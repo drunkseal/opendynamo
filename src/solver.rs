@@ -266,11 +266,6 @@ let a3 = COMP::from_f64(1.0/3.0); let b3 = COMP::from_f64(2.0/3.0); let c3 = COM
             args_rk3.arg(&mut d_u).arg(&d_u0).arg(&d_rhs).arg(&a3).arg(&b3).arg(&c3).arg(&ss_i32);
             unsafe { args_rk3.launch(add_cfg)? };
             
-            if step % 1 == 0 {
-                stream.synchronize()?;
-                println!("Step {} completed.", step);
-            }
-            
             if step % config.io.save_freq == 0 || step == n_steps - 1 {
                 let event = stream.record_event(None)?;
                 io_stream.wait(&event)?;
