@@ -92,6 +92,7 @@ pub fn run_solver_generic<
     opts.options.push(
         match config.solver.flux_scheme {
             FluxScheme::Slau2 => "-DFLUX_SCHEME_SLAU2",
+            FluxScheme::AusmPlus => "-DFLUX_SCHEME_AUSMPLUS",
             FluxScheme::Rusanov => "-DFLUX_SCHEME_RUSANOV",
         }
         .to_string(),

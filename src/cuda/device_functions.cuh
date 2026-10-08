@@ -187,7 +187,78 @@ __device__ inline void ausm_plus_flux(const COMPUTE_REAL* UL, const COMPUTE_REAL
     }
 }
 
-#ifdef FLUX_SCHEME_SLAU2
+// SLAU2 (Shima 2011), following the SU2 implementation (CUpwSLAU_Flow with slau2 = true)
+__device__ inline void slau2_flux(const COMPUTE_REAL* UL, const COMPUTE_REAL* UR, const COMPUTE_REAL n[3], COMPUTE_REAL* F_com) {
+    COMPUTE_REAL rhoL = UL[0], rhouL = UL[1], rhovL = UL[2], rhowL = UL[3], EL = UL[4];
+    COMPUTE_REAL rhoR = UR[0], rhouR = UR[1], rhovR = UR[2], rhowR = UR[3], ER = UR[4];
+    
+    COMPUTE_REAL uL = rhouL/rhoL, vL = rhovL/rhoL, wL = rhowL/rhoL;
+    COMPUTE_REAL uR = rhouR/rhoR, vR = rhovR/rhoR, wR = rhowR/rhoR;
+    COMPUTE_REAL pL = compute_pressure(rhoL, rhouL, rhovL, rhowL, EL);
+    COMPUTE_REAL pR = compute_pressure(rhoR, rhouR, rhovR, rhowR, ER);
+    
+    COMPUTE_REAL vnL = uL*n[0] + vL*n[1] + wL*n[2];
+    COMPUTE_REAL vnR = uR*n[0] + vR*n[1] + wR*n[2];
+    COMPUTE_REAL HL = (EL + pL)/rhoL;
+    COMPUTE_REAL HR = (ER + pR)/rhoR;
+    
+    COMPUTE_REAL sqL = uL*uL + vL*vL + wL*wL;
+    COMPUTE_REAL sqR = uR*uR + vR*vR + wR*wR;
+    
+    COMPUTE_REAL cL = sqrt(fmax(((COMPUTE_REAL)0.0), GAMMA * pL / fmax(((COMPUTE_REAL)1e-7), rhoL)));
+    COMPUTE_REAL cR = sqrt(fmax(((COMPUTE_REAL)0.0), GAMMA * pR / fmax(((COMPUTE_REAL)1e-7), rhoR)));
+    
+    COMPUTE_REAL aF = ((COMPUTE_REAL)0.5) * (cL + cR);
+    COMPUTE_REAL mL = vnL / aF;
+    COMPUTE_REAL mR = vnR / aF;
+    
+    // Smooth local Mach number and contact discontinuity switch
+    COMPUTE_REAL mach_tilde = fmin(((COMPUTE_REAL)1.0), (((COMPUTE_REAL)1.0)/aF) * sqrt(((COMPUTE_REAL)0.5) * (sqL + sqR)));
+    COMPUTE_REAL chi = ((COMPUTE_REAL)1.0) - mach_tilde;
+    chi = chi * chi;
+    COMPUTE_REAL f_rho = -fmax(fmin(mL, ((COMPUTE_REAL)0.0)), ((COMPUTE_REAL)-1.0)) * fmin(fmax(mR, ((COMPUTE_REAL)0.0)), ((COMPUTE_REAL)1.0));
+    
+    // Density-weighted mean normal velocity magnitude
+    COMPUTE_REAL vn_mag = (rhoL * fabs(vnL) + rhoR * fabs(vnR)) / (rhoL + rhoR);
+    COMPUTE_REAL vn_magL = (((COMPUTE_REAL)1.0) - f_rho) * vn_mag + f_rho * fabs(vnL);
+    COMPUTE_REAL vn_magR = (((COMPUTE_REAL)1.0) - f_rho) * vn_mag + f_rho * fabs(vnR);
+    
+    COMPUTE_REAL mdot = ((COMPUTE_REAL)0.5) * (rhoL * (vnL + vn_magL) + rhoR * (vnR - vn_magR) - (chi / aF) * (pR - pL));
+    
+    // Pressure split: AUSM+ polynomials with alpha = 0
+    COMPUTE_REAL betaL, betaR;
+    if (fabs(mL) < 1.0) {
+        betaL = ((COMPUTE_REAL)0.25) * (((COMPUTE_REAL)2.0) - mL) * (mL + 1.0) * (mL + 1.0);
+    } else {
+        betaL = (mL >= 0.0) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
+    }
+    if (fabs(mR) < 1.0) {
+        betaR = ((COMPUTE_REAL)0.25) * (((COMPUTE_REAL)2.0) + mR) * (mR - 1.0) * (mR - 1.0);
+    } else {
+        betaR = (mR >= 0.0) ? ((COMPUTE_REAL)0.0) : ((COMPUTE_REAL)1.0);
+    }
+    
+    COMPUTE_REAL p_face = ((COMPUTE_REAL)0.5) * (pL + pR) + ((COMPUTE_REAL)0.5) * (betaL - betaR) * (pL - pR);
+    p_face += sqrt(((COMPUTE_REAL)0.5) * (sqL + sqR)) * (betaL + betaR - ((COMPUTE_REAL)1.0)) * aF * ((COMPUTE_REAL)0.5) * (rhoL + rhoR);
+    
+    if (mdot > 0.0) {
+        F_com[0] = mdot;
+        F_com[1] = mdot * uL + p_face * n[0];
+        F_com[2] = mdot * vL + p_face * n[1];
+        F_com[3] = mdot * wL + p_face * n[2];
+        F_com[4] = mdot * HL;
+    } else {
+        F_com[0] = mdot;
+        F_com[1] = mdot * uR + p_face * n[0];
+        F_com[2] = mdot * vR + p_face * n[1];
+        F_com[3] = mdot * wR + p_face * n[2];
+        F_com[4] = mdot * HR;
+    }
+}
+
+#if defined(FLUX_SCHEME_SLAU2)
+#define compute_interface_flux slau2_flux
+#elif defined(FLUX_SCHEME_AUSMPLUS)
 #define compute_interface_flux ausm_plus_flux
 #else
 #define compute_interface_flux rusanov_flux

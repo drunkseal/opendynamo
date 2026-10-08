@@ -107,6 +107,8 @@ pub struct PhysicsConfig {
 #[serde(rename_all = "lowercase")]
 pub enum FluxScheme {
     Slau2,
+    #[serde(rename = "ausm+")]
+    AusmPlus,
     Rusanov,
 }
 

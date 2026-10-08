@@ -169,7 +169,7 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     COMPUTE_REAL F_inv[5], F_v_L[5], F_v_R[5], F_i_L[5], F_i_R[5];
     COMPUTE_REAL n[3] = {1.0, 0.0, 0.0};
     
-    // Note: compute_interface_flux is slau2_flux or rusanov_flux mapped via macro
+    // Note: compute_interface_flux is slau2_flux, ausm_plus_flux or rusanov_flux mapped via macro
     compute_interface_flux(u_L, u_R, n, F_inv);
     compute_viscous_flux_x(u_L, q_L, F_v_L);
     compute_viscous_flux_x(u_R, q_R, F_v_R);
