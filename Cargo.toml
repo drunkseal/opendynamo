@@ -1,0 +1,12 @@
+[package]
+name = "open_dynamo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+cudarc = { version = "0.19.10", features = ["nvrtc", "cuda-version-from-build-system"] }
+hdf5-metno = "0.15.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+
