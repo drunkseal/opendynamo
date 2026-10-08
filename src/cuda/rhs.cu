@@ -45,13 +45,10 @@ extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* 
         compute_euler_flux_x(u_tmp, fi);
         compute_viscous_flux_x(u_tmp, q_tmp, fv);
         __syncthreads();
-        #pragma unroll
         for (int v = 0; v < 5; ++v) s_U[v][pt] = fi[v] - fv[v];
         __syncthreads();
-        #pragma unroll
         for (int v = 0; v < 5; ++v) {
             COMPUTE_REAL dF = 0;
-            #pragma unroll
             for (int m = 0; m < 4; ++m) dF += c_d_matrix[i * 4 + m] * s_U[v][(m + j * 4 + k * 16)];
             rhs_acc[v] += dF * Jx;
         }
@@ -65,13 +62,10 @@ extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* 
         compute_euler_flux_y(u_tmp, fi);
         compute_viscous_flux_y(u_tmp, q_tmp, fv);
         __syncthreads();
-        #pragma unroll
         for (int v = 0; v < 5; ++v) s_U[v][pt] = fi[v] - fv[v];
         __syncthreads();
-        #pragma unroll
         for (int v = 0; v < 5; ++v) {
             COMPUTE_REAL dF = 0;
-            #pragma unroll
             for (int m = 0; m < 4; ++m) dF += c_d_matrix[j * 4 + m] * s_U[v][(i + m * 4 + k * 16)];
             rhs_acc[v] += dF * Jy;
         }
@@ -85,13 +79,10 @@ extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* 
         compute_euler_flux_z(u_tmp, fi);
         compute_viscous_flux_z(u_tmp, q_tmp, fv);
         __syncthreads();
-        #pragma unroll
         for (int v = 0; v < 5; ++v) s_U[v][pt] = fi[v] - fv[v];
         __syncthreads();
-        #pragma unroll
         for (int v = 0; v < 5; ++v) {
             COMPUTE_REAL dF = 0;
-            #pragma unroll
             for (int m = 0; m < 4; ++m) dF += c_d_matrix[k * 4 + m] * s_U[v][(i + j * 4 + m * 16)];
             rhs_acc[v] += dF * Jz;
         }
@@ -146,11 +137,8 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     int base_R = elem_R * 64 + 4 * pt;
     
     typename V4Type<U_REAL>::type U_r[5], U_l[5];
-    #pragma unroll
     for (int v = 0; v < 5; ++v) U_r[v] = ld4(U + v * total_points + base_R);
-    #pragma unroll
     for (int v = 0; v < 5; ++v) U_l[v] = ld4(U + v * total_points + base_L);
-    #pragma unroll
     for (int v = 0; v < 5; ++v) {
         u_L[v] = (COMPUTE_REAL)U_l[v].x * c_extrap_right[0] + (COMPUTE_REAL)U_l[v].y * c_extrap_right[1]
                + (COMPUTE_REAL)U_l[v].z * c_extrap_right[2] + (COMPUTE_REAL)U_l[v].w * c_extrap_right[3];
@@ -159,19 +147,16 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     }
     typename V4Type<Q_REAL>::type Q_r[11], Q_l[11];
     int qi = 0;
-    #pragma unroll
     for (int v = 0; v < 15; ++v) {
         if (v == 8 || v == 10 || v == 13 || v == 14) continue;
         Q_r[qi] = ld4(Q + v * total_points + base_R); ++qi;
     }
     qi = 0;
-    #pragma unroll
     for (int v = 0; v < 15; ++v) {
         if (v == 8 || v == 10 || v == 13 || v == 14) continue;
         Q_l[qi] = ld4(Q + v * total_points + base_L); ++qi;
     }
     qi = 0;
-    #pragma unroll
     for (int v = 0; v < 15; ++v) {
         if (v == 8 || v == 10 || v == 13 || v == 14) continue;
         q_L[v] = (COMPUTE_REAL)Q_l[qi].x * c_extrap_right[0] + (COMPUTE_REAL)Q_l[qi].y * c_extrap_right[1]
@@ -249,7 +234,6 @@ extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_R
     COMPUTE_REAL c_R = c_extrap_right[m];
     COMPUTE_REAL c_L = c_extrap_left[m];
     
-    #pragma unroll
     for (int v = 0; v < 5; ++v) {
         typename V4Type<U_REAL>::type fr = ld4(U + v * total_points + base_R);
         typename V4Type<U_REAL>::type fl = ld4(U + v * total_points + base_L);
@@ -266,7 +250,6 @@ extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_R
         u_L[v] = (m == 0) ? sL0 : (m == 1) ? sL1 : (m == 2) ? sL2 : sL3;
         u_R[v] = (m == 0) ? sR0 : (m == 1) ? sR1 : (m == 2) ? sR2 : sR3;
     }
-    #pragma unroll
     for (int v = 0; v < 15; ++v) {
         if (v == 5 || v == 9 || v == 12 || v == 14) continue; // unused by viscous y-flux
         typename V4Type<Q_REAL>::type fr = ld4(Q + v * total_points + base_R);
