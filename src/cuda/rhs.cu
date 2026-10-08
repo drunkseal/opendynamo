@@ -7,8 +7,12 @@ __device__ __forceinline__ typename V4Type<T>::type ld4(const T* p) {
     return *reinterpret_cast<const typename V4Type<T>::type*>(p);
 }
 
-// Volume Kernel
-extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* RHS, const Q_REAL* Q, int nx, int ny, int nz) {
+// Volume Kernel + face corrections (fused: apply_corrections eliminated RHS read/write round-trip)
+extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* RHS, const Q_REAL* Q,
+    const COMPUTE_REAL* j_x_L, const COMPUTE_REAL* j_x_R,
+    const COMPUTE_REAL* j_y_L, const COMPUTE_REAL* j_y_R,
+    const COMPUTE_REAL* j_z_L, const COMPUTE_REAL* j_z_R,
+    int nx, int ny, int nz) {
     __shared__ COMPUTE_REAL s_U[5][64];
     __shared__ COMPUTE_REAL s_Q[15][64];
 
@@ -93,10 +97,28 @@ extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* 
         }
     }
 
+    int num_faces_total = nx * ny * nz * 16;
+    int face_pt_x = j + k * 4;
+    int face_pt_y = i + k * 4;
+    int face_pt_z = i + j * 4;
+    
     for (int v = 0; v < 5; ++v) {
         COMPUTE_REAL rhs_val = -rhs_acc[v];
         if (v == 1) rhs_val += ((COMPUTE_REAL)0.001);
-        RHS[v * total_points + g_idx] = (RHS_REAL)rhs_val;
+        
+        COMPUTE_REAL j_x_L_val = j_x_L[v * num_faces_total + elem_idx * 16 + face_pt_x];
+        COMPUTE_REAL j_x_R_val = j_x_R[v * num_faces_total + elem_idx * 16 + face_pt_x];
+        COMPUTE_REAL c_x = -(j_x_L_val * c_g_left_prime[i] * Jx) - (j_x_R_val * c_g_right_prime[i] * Jx);
+        
+        COMPUTE_REAL j_y_L_val = j_y_L[v * num_faces_total + elem_idx * 16 + face_pt_y];
+        COMPUTE_REAL j_y_R_val = j_y_R[v * num_faces_total + elem_idx * 16 + face_pt_y];
+        COMPUTE_REAL c_y = -(j_y_L_val * c_g_left_prime[j] * Jy) - (j_y_R_val * c_g_right_prime[j] * Jy);
+        
+        COMPUTE_REAL j_z_L_val = j_z_L[v * num_faces_total + elem_idx * 16 + face_pt_z];
+        COMPUTE_REAL j_z_R_val = j_z_R[v * num_faces_total + elem_idx * 16 + face_pt_z];
+        COMPUTE_REAL c_z = -(j_z_L_val * c_g_left_prime[k] * Jz) - (j_z_R_val * c_g_right_prime[k] * Jz);
+        
+        RHS[v * total_points + g_idx] = (RHS_REAL)rhs_val + (RHS_REAL)(c_x + c_y + c_z);
     }
 }
 
@@ -310,48 +332,5 @@ extern "C" __global__ void compute_face_flux_z_kernel(const U_REAL* U, COMPUTE_R
         j_z_R[v * num_faces_total + elem_L * 16 + pt] = j_L;
         j_z_L[v * num_faces_total + elem_R * 16 + pt] = j_R;
 
-    }
-}
-
-extern "C" __global__ void apply_corrections_kernel(
-    RHS_REAL* RHS, 
-    const COMPUTE_REAL* j_x_L, const COMPUTE_REAL* j_x_R,
-    const COMPUTE_REAL* j_y_L, const COMPUTE_REAL* j_y_R,
-    const COMPUTE_REAL* j_z_L, const COMPUTE_REAL* j_z_R,
-    int nx, int ny, int nz) 
-{
-    int elem_idx = blockIdx.x;
-    int pt = threadIdx.x;
-    int total_points = nx * ny * nz * 64;
-    int num_faces_total = nx * ny * nz * 16;
-    int g_idx = elem_idx * 64 + pt;
-    
-    int i = pt % 4;
-    int j = (pt / 4) % 4;
-    int k = pt / 16;
-    
-    COMPUTE_REAL dx = ((COMPUTE_REAL)4.0) * ((COMPUTE_REAL)3.141592653589793) / (COMPUTE_REAL)nx;
-    COMPUTE_REAL dy = ((COMPUTE_REAL)2.0) / (COMPUTE_REAL)ny;
-    COMPUTE_REAL dz = ((COMPUTE_REAL)4.0) / ((COMPUTE_REAL)3.0) * ((COMPUTE_REAL)3.141592653589793) / (COMPUTE_REAL)nz;
-    COMPUTE_REAL Jx = ((COMPUTE_REAL)2.0) / dx; COMPUTE_REAL Jy = ((COMPUTE_REAL)2.0) / dy; COMPUTE_REAL Jz = ((COMPUTE_REAL)2.0) / dz;
-
-    int face_pt_x = j + k * 4;
-    int face_pt_y = i + k * 4;
-    int face_pt_z = i + j * 4;
-    
-    for (int v = 0; v < 5; ++v) {
-        COMPUTE_REAL j_L_val = j_x_L[v * num_faces_total + elem_idx * 16 + face_pt_x];
-        COMPUTE_REAL j_R_val = j_x_R[v * num_faces_total + elem_idx * 16 + face_pt_x];
-        COMPUTE_REAL c_x = -(j_L_val * c_g_left_prime[i] * Jx) - (j_R_val * c_g_right_prime[i] * Jx);
-        
-        COMPUTE_REAL j_y_L_val = j_y_L[v * num_faces_total + elem_idx * 16 + face_pt_y];
-        COMPUTE_REAL j_y_R_val = j_y_R[v * num_faces_total + elem_idx * 16 + face_pt_y];
-        COMPUTE_REAL c_y = -(j_y_L_val * c_g_left_prime[j] * Jy) - (j_y_R_val * c_g_right_prime[j] * Jy);
-        
-        COMPUTE_REAL j_z_L_val = j_z_L[v * num_faces_total + elem_idx * 16 + face_pt_z];
-        COMPUTE_REAL j_z_R_val = j_z_R[v * num_faces_total + elem_idx * 16 + face_pt_z];
-        COMPUTE_REAL c_z = -(j_z_L_val * c_g_left_prime[k] * Jz) - (j_z_R_val * c_g_right_prime[k] * Jz);
-        
-        RHS[v * total_points + g_idx] += (RHS_REAL)(c_x + c_y + c_z);
     }
 }

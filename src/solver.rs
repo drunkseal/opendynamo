@@ -80,7 +80,6 @@ pub fn run_solver_generic<
         let compute_face_flux_x_kernel = module.load_function("compute_face_flux_x_kernel")?;
         let compute_face_flux_y_kernel = module.load_function("compute_face_flux_y_kernel")?;
         let compute_face_flux_z_kernel = module.load_function("compute_face_flux_z_kernel")?;
-        let apply_corrections_kernel = module.load_function("apply_corrections_kernel")?;
         let rk_stage_kernel = module.load_function("rk_stage_kernel")?;
         
         println!("Generating FR operators for P=3...");
@@ -184,10 +183,6 @@ pub fn run_solver_generic<
             args_grad.arg(&d_u).arg(&mut d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_grad.launch(rhs_cfg)? };
             
-            let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
-            args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_v.launch(rhs_cfg)? };
-            
             let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
             args_x.arg(&d_u).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_x.launch(face_x_cfg)? };
@@ -199,9 +194,10 @@ pub fn run_solver_generic<
             let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
             args_z.arg(&d_u).arg(&d_j_z_l).arg(&d_j_z_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_z.launch(face_z_cfg)? };
-            let mut args_corr = stream.launch_builder(&apply_corrections_kernel);
-            args_corr.arg(&mut d_rhs).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_corr.launch(rhs_cfg)? };
+            
+            let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
+            args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
+            unsafe { args_v.launch(rhs_cfg)? };
 
 let a1 = COMP::from_f64(1.0); let b1 = COMP::from_f64(0.0); let c1 = dt;
             let mut args_rk1 = stream.launch_builder(&rk_stage_kernel);
@@ -213,10 +209,6 @@ let a1 = COMP::from_f64(1.0); let b1 = COMP::from_f64(0.0); let c1 = dt;
             args_grad2.arg(&d_u).arg(&mut d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_grad2.launch(rhs_cfg)? };
             
-            let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
-            args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_v.launch(rhs_cfg)? };
-            
             let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
             args_x.arg(&d_u).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_x.launch(face_x_cfg)? };
@@ -228,9 +220,10 @@ let a1 = COMP::from_f64(1.0); let b1 = COMP::from_f64(0.0); let c1 = dt;
             let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
             args_z.arg(&d_u).arg(&d_j_z_l).arg(&d_j_z_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_z.launch(face_z_cfg)? };
-            let mut args_corr = stream.launch_builder(&apply_corrections_kernel);
-            args_corr.arg(&mut d_rhs).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_corr.launch(rhs_cfg)? };
+            
+            let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
+            args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
+            unsafe { args_v.launch(rhs_cfg)? };
 
 let a2 = COMP::from_f64(0.75); let b2 = COMP::from_f64(0.25); let c2 = COMP::from_f64(0.25) * dt;
             let mut args_rk2 = stream.launch_builder(&rk_stage_kernel);
@@ -242,10 +235,6 @@ let a2 = COMP::from_f64(0.75); let b2 = COMP::from_f64(0.25); let c2 = COMP::fro
             args_grad3.arg(&d_u).arg(&mut d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_grad3.launch(rhs_cfg)? };
             
-            let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
-            args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_v.launch(rhs_cfg)? };
-            
             let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
             args_x.arg(&d_u).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_x.launch(face_x_cfg)? };
@@ -257,9 +246,10 @@ let a2 = COMP::from_f64(0.75); let b2 = COMP::from_f64(0.25); let c2 = COMP::fro
             let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
             args_z.arg(&d_u).arg(&d_j_z_l).arg(&d_j_z_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_z.launch(face_z_cfg)? };
-            let mut args_corr = stream.launch_builder(&apply_corrections_kernel);
-            args_corr.arg(&mut d_rhs).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_corr.launch(rhs_cfg)? };
+            
+            let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
+            args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
+            unsafe { args_v.launch(rhs_cfg)? };
 
 let a3 = COMP::from_f64(1.0/3.0); let b3 = COMP::from_f64(2.0/3.0); let c3 = COMP::from_f64(2.0/3.0) * dt;
             let mut args_rk3 = stream.launch_builder(&rk_stage_kernel);
