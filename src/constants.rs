@@ -1,5 +1,6 @@
-//! Host-side constants shared by the solver and IO. The CUDA sources mirror
-//! these literals (they cannot share Rust constants).
+//! Host-side constants shared by the solver and IO. FR_ORDER is pushed to the
+//! NVRTC compiler as -DFR_ORDER so the CUDA sources derive identical layout
+//! macros (NPTS1D, NPTS_ELEM, ...) from the same single source of truth.
 
 /// FR polynomial order P (point count per direction is P+1).
 pub const FR_ORDER: usize = 3;
@@ -12,6 +13,6 @@ pub const N_VARS: usize = 5;
 /// Primitive gradients: 5 variables x 3 directions.
 pub const N_Q_COMPONENTS: usize = 15;
 /// Faces grouped per thread block for in-block cache reuse.
-pub const FACES_PER_BLOCK: usize = 4;
+pub const FACES_PER_BLOCK: usize = PTS_PER_ELEM / PTS_PER_FACE;
 /// Step label used for the initial-condition output file.
 pub const INIT_OUTPUT_STEP: usize = 99999;

@@ -1,6 +1,6 @@
 use cudarc::driver::PushKernelArg;
 
-use crate::config::{FluxScheme, ViscosityModel};
+use crate::config::{FluxScheme, InitialCondition, ViscosityModel, YBoundary};
 use crate::constants::{
     FACES_PER_BLOCK, FR_ORDER, INIT_OUTPUT_STEP, N_Q_COMPONENTS, N_VARS, PTS_PER_ELEM, PTS_PER_FACE,
 };
@@ -63,6 +63,21 @@ pub fn run_solver_generic<
     opts.options.push(format!("-DRHS_REAL={}", RHS::c_type()));
     opts.options
         .push(format!("-DCOMPUTE_REAL={}", COMP::c_type()));
+    opts.options.push(format!("-DFR_ORDER={FR_ORDER}"));
+    opts.options.push(format!(
+        "-DINIT_CHANNEL={}",
+        match config.physics.initial_condition {
+            InitialCondition::Channel => 1,
+            InitialCondition::Uniform => 0,
+        }
+    ));
+    opts.options.push(format!(
+        "-DBC_Y_WALL={}",
+        match config.physics.y_boundary {
+            YBoundary::Wall => 1,
+            YBoundary::Periodic => 0,
+        }
+    ));
 
     if config.physics.viscosity_model == ViscosityModel::Sutherland {
         opts.options.push("-DVISCOSITY_SUTHERLAND".to_string());
@@ -171,6 +186,9 @@ pub fn run_solver_generic<
     let io_stream = ctx.new_stream()?;
 
     let mach_bulk = COMP::from_f64(config.physics.mach_bulk as f64);
+    let lx = COMP::from_f64(config.mesh.lx as f64);
+    let ly = COMP::from_f64(config.mesh.ly as f64);
+    let lz = COMP::from_f64(config.mesh.lz as f64);
 
     println!("Initializing flow...");
     let init_cfg = cudarc::driver::LaunchConfig {
@@ -188,7 +206,8 @@ pub fn run_solver_generic<
         .arg(&nx_i32)
         .arg(&ny_i32)
         .arg(&nz_i32)
-        .arg(&mach_bulk);
+        .arg(&mach_bulk)
+        .arg(&ly);
     unsafe { args_init.launch(init_cfg)? };
 
     // SAVE INITIAL CONDITION AS STEP 99999
@@ -237,7 +256,10 @@ pub fn run_solver_generic<
             .arg(&mut *d_q)
             .arg(&nx_i32)
             .arg(&ny_i32)
-            .arg(&nz_i32);
+            .arg(&nz_i32)
+            .arg(&lx)
+            .arg(&ly)
+            .arg(&lz);
         unsafe { args_grad.launch(rhs_cfg)? };
 
         let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
@@ -248,7 +270,8 @@ pub fn run_solver_generic<
             .arg(&*d_q)
             .arg(&nx_i32)
             .arg(&ny_i32)
-            .arg(&nz_i32);
+            .arg(&nz_i32)
+            .arg(&lx);
         unsafe { args_x.launch(face_x_cfg)? };
 
         let mut args_y = stream.launch_builder(&compute_face_flux_y_kernel);
@@ -259,7 +282,8 @@ pub fn run_solver_generic<
             .arg(&*d_q)
             .arg(&nx_i32)
             .arg(&ny_i32)
-            .arg(&nz_i32);
+            .arg(&nz_i32)
+            .arg(&ly);
         unsafe { args_y.launch(face_y_cfg)? };
 
         let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
@@ -270,7 +294,8 @@ pub fn run_solver_generic<
             .arg(&*d_q)
             .arg(&nx_i32)
             .arg(&ny_i32)
-            .arg(&nz_i32);
+            .arg(&nz_i32)
+            .arg(&lz);
         unsafe { args_z.launch(face_z_cfg)? };
 
         let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
@@ -286,7 +311,10 @@ pub fn run_solver_generic<
             .arg(&d_j_z_r)
             .arg(&nx_i32)
             .arg(&ny_i32)
-            .arg(&nz_i32);
+            .arg(&nz_i32)
+            .arg(&lx)
+            .arg(&ly)
+            .arg(&lz);
         unsafe { args_v.launch(rhs_cfg)? };
         Ok(())
     };
