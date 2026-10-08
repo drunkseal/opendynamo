@@ -81,6 +81,7 @@ pub fn run_solver_generic<
         let compute_face_flux_y_kernel = module.load_function("compute_face_flux_y_kernel")?;
         let compute_face_flux_z_kernel = module.load_function("compute_face_flux_z_kernel")?;
         let rk_stage_kernel = module.load_function("rk_stage_kernel")?;
+        let rk_stage1_kernel = module.load_function("rk_stage1_kernel")?;
         
         println!("Generating FR operators for P=3...");
         let ops = crate::fr_math::generate_fr_operators(3);
@@ -172,12 +173,6 @@ pub fn run_solver_generic<
         println!("Starting RK3 explicit time integration...");
         let start_time = std::time::Instant::now();
         for step in 0..n_steps {
-            // U0 = U
-            let a0 = COMP::from_f64(1.0); let b0 = COMP::from_f64(0.0); let c0 = COMP::from_f64(0.0);
-            let mut args_rk = stream.launch_builder(&rk_stage_kernel);
-            args_rk.arg(&mut d_u0).arg(&d_u).arg(&d_rhs).arg(&a0).arg(&b0).arg(&c0).arg(&ss_i32);
-            unsafe { args_rk.launch(add_cfg)? };
-            
             // Stage 1
             let mut args_grad = stream.launch_builder(&compute_gradient_kernel);
             args_grad.arg(&d_u).arg(&mut d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
@@ -199,10 +194,11 @@ pub fn run_solver_generic<
             args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_v.launch(rhs_cfg)? };
 
-let a1 = COMP::from_f64(1.0); let b1 = COMP::from_f64(0.0); let c1 = dt;
-            let mut args_rk1 = stream.launch_builder(&rk_stage_kernel);
-            args_rk1.arg(&mut d_u).arg(&d_u0).arg(&d_rhs).arg(&a1).arg(&b1).arg(&c1).arg(&ss_i32);
+let a1 = COMP::from_f64(1.0); let c1 = dt;
+            let mut args_rk1 = stream.launch_builder(&rk_stage1_kernel);
+            args_rk1.arg(&mut d_u0).arg(&d_u).arg(&d_rhs).arg(&a1).arg(&c1).arg(&ss_i32);
             unsafe { args_rk1.launch(add_cfg)? };
+            std::mem::swap(&mut d_u, &mut d_u0);
             
             // Stage 2
             let mut args_grad2 = stream.launch_builder(&compute_gradient_kernel);
