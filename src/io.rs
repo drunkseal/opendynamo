@@ -1,11 +1,12 @@
-use std::path::Path;
 use std::fs;
+use std::path::Path;
+
 use hdf5_metno as hdf5;
 
+use crate::constants::{N_VARS, PTS_PER_ELEM};
 
-pub fn save_hdf5_xdmf<T: hdf5::H5Type + std::fmt::Debug>(
+pub fn save_hdf5_xdmf<T: hdf5::H5Type>(
     step: usize,
-    _time: f32,
     u_data: &[T],
     nx: usize,
     ny: usize,
@@ -14,33 +15,28 @@ pub fn save_hdf5_xdmf<T: hdf5::H5Type + std::fmt::Debug>(
     prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(out_dir)?;
-    
+
     let h5_filename = format!("{}_{:05}.h5", prefix, step);
     let h5_path = Path::new(out_dir).join(&h5_filename);
     let xdmf_path = Path::new(out_dir).join(format!("{}_{:05}.xmf", prefix, step));
-    
+
     // Create HDF5 file and write data
     let file = hdf5::File::create(&h5_path)?;
     let group = file.create_group("data")?;
-    
+
     let total_elements = nx * ny * nz;
-    let n_points_elem = 64;
-    let n_vars = 5;
-    let total_dofs = total_elements * n_points_elem * n_vars;
-    
+    let total_dofs = total_elements * PTS_PER_ELEM * N_VARS;
+
     // Write entire array as 1D
-    let dataset = group.new_dataset::<T>()
-        .shape(total_dofs)
-        .create("rho")?;
-        
+    let dataset = group.new_dataset::<T>().shape(total_dofs).create("rho")?;
+
     dataset.write(u_data)?;
-    
-    let float_size = std::mem::size_of::<T>();
-    let prec = if float_size == 8 { 8 } else { 4 };
-    
+
+    let prec = std::mem::size_of::<T>();
+
     // Write XDMF file pointing to the HDF5 dataset
     let xdmf_content = format!(
-r#"<?xml version="1.0" ?>
+        r#"<?xml version="1.0" ?>
 <!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
 <Xdmf Version="2.0">
   <Domain>
@@ -62,8 +58,15 @@ r#"<?xml version="1.0" ?>
     </Grid>
   </Domain>
 </Xdmf>
-"#, nz+1, ny+1, nx+1, total_elements, prec, h5_filename);
-    
+"#,
+        nz + 1,
+        ny + 1,
+        nx + 1,
+        total_elements,
+        prec,
+        h5_filename
+    );
+
     fs::write(xdmf_path, xdmf_content)?;
     Ok(())
 }
