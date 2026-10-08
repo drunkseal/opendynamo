@@ -1,3 +1,11 @@
+template <typename T> struct V4Type;
+template <> struct V4Type<float>  { typedef float4  type; };
+template <> struct V4Type<double> { typedef double4 type; };
+
+template <typename T>
+__device__ __forceinline__ typename V4Type<T>::type ld4(const T* p) {
+    return *reinterpret_cast<const typename V4Type<T>::type*>(p);
+}
 
 // Volume Kernel
 extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* RHS, const Q_REAL* Q, int nx, int ny, int nz) {
@@ -111,27 +119,27 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     COMPUTE_REAL u_L[5] = {0}, q_L[15] = {0};
     COMPUTE_REAL u_R[5] = {0}, q_R[15] = {0};
     
-    int f1 = pt % 4; // j
-    int f2 = pt / 4; // k
+    // Thread pt owns m = 0..3 (contiguous floats): idx = elem*64 + 4*pt + m
+    int base_L = elem_L * 64 + 4 * pt;
+    int base_R = elem_R * 64 + 4 * pt;
     
     #pragma unroll
-    for (int m = 0; m < 4; ++m) {
-        int idx_L = elem_L * 64 + (m + f1 * 4 + f2 * 16);
-        int idx_R = elem_R * 64 + (m + f1 * 4 + f2 * 16);
-        
-        COMPUTE_REAL c_R = c_extrap_right[m];
-        COMPUTE_REAL c_L = c_extrap_left[m];
-        
-        #pragma unroll
-        for (int v = 0; v < 5; ++v) {
-            u_L[v] += U[v * total_points + idx_L] * c_R;
-            u_R[v] += U[v * total_points + idx_R] * c_L;
-        }
-        #pragma unroll
-        for (int v = 0; v < 15; ++v) {
-            q_L[v] += Q[v * total_points + idx_L] * c_R;
-            q_R[v] += Q[v * total_points + idx_R] * c_L;
-        }
+    for (int v = 0; v < 5; ++v) {
+        typename V4Type<U_REAL>::type ul = ld4(U + v * total_points + base_L);
+        typename V4Type<U_REAL>::type ur = ld4(U + v * total_points + base_R);
+        u_L[v] = (COMPUTE_REAL)ul.x * c_extrap_right[0] + (COMPUTE_REAL)ul.y * c_extrap_right[1]
+               + (COMPUTE_REAL)ul.z * c_extrap_right[2] + (COMPUTE_REAL)ul.w * c_extrap_right[3];
+        u_R[v] = (COMPUTE_REAL)ur.x * c_extrap_left[0] + (COMPUTE_REAL)ur.y * c_extrap_left[1]
+               + (COMPUTE_REAL)ur.z * c_extrap_left[2] + (COMPUTE_REAL)ur.w * c_extrap_left[3];
+    }
+    #pragma unroll
+    for (int v = 0; v < 15; ++v) {
+        typename V4Type<Q_REAL>::type ql = ld4(Q + v * total_points + base_L);
+        typename V4Type<Q_REAL>::type qr = ld4(Q + v * total_points + base_R);
+        q_L[v] = (COMPUTE_REAL)ql.x * c_extrap_right[0] + (COMPUTE_REAL)ql.y * c_extrap_right[1]
+               + (COMPUTE_REAL)ql.z * c_extrap_right[2] + (COMPUTE_REAL)ql.w * c_extrap_right[3];
+        q_R[v] = (COMPUTE_REAL)qr.x * c_extrap_left[0] + (COMPUTE_REAL)qr.y * c_extrap_left[1]
+               + (COMPUTE_REAL)qr.z * c_extrap_left[2] + (COMPUTE_REAL)qr.w * c_extrap_left[3];
     }
     
     COMPUTE_REAL F_inv[5], F_v_L[5], F_v_R[5], F_i_L[5], F_i_R[5];
@@ -161,14 +169,19 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
 }
 
 extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_REAL* j_y_L, COMPUTE_REAL* j_y_R, const Q_REAL* Q, int nx, int ny, int nz) {
-    int face_idx = blockIdx.x * 4 + threadIdx.x / 16;
+    int sub = threadIdx.x / 16;
     int pt = threadIdx.x % 16;
-    if (face_idx >= nx * ny * nz) return;
+    
+    // Block groups 4 faces sharing (ex, ez) with consecutive ey -> in-block L1 reuse
+    int ny4 = (ny + 3) / 4;
+    int bf = blockIdx.x;
+    int by4 = bf % ny4;
+    int ex = (bf / ny4) % nx;
+    int ez = bf / (ny4 * nx);
+    int ey = by4 * 4 + sub;
+    if (ey >= ny) return;
     
     int total_points = nx * ny * nz * 64;
-    int ex = face_idx % nx;
-    int ey = (face_idx / nx) % ny;
-    int ez = face_idx / (nx * ny);
     
     if (ey == 0) return; // For channel flow, skip Y boundary faces logic if complex, or implement slip/no-slip.
     // Wait, in the original code, ey==0 and ey==ny-1 had wall boundaries.
@@ -232,14 +245,19 @@ extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_R
 }
 
 extern "C" __global__ void compute_face_flux_z_kernel(const U_REAL* U, COMPUTE_REAL* j_z_L, COMPUTE_REAL* j_z_R, const Q_REAL* Q, int nx, int ny, int nz) {
-    int face_idx = blockIdx.x * 4 + threadIdx.x / 16;
+    int sub = threadIdx.x / 16;
     int pt = threadIdx.x % 16;
-    if (face_idx >= nx * ny * nz) return;
+    
+    // Block groups 4 faces sharing (ex, ey) with consecutive ez -> in-block L1 reuse
+    int nz4 = (nz + 3) / 4;
+    int bf = blockIdx.x;
+    int bz4 = bf % nz4;
+    int ex = (bf / nz4) % nx;
+    int ey = (bf / nz4) / nx;
+    int ez = bz4 * 4 + sub;
+    if (ez >= nz) return;
     
     int total_points = nx * ny * nz * 64;
-    int ex = face_idx % nx;
-    int ey = (face_idx / nx) % ny;
-    int ez = face_idx / (nx * ny);
     
     int ez_L = (ez - 1 + nz) % nz;
     int ez_R = ez;

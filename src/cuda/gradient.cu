@@ -50,7 +50,8 @@ extern "C" __global__ void compute_gradient_kernel(const U_REAL* U, Q_REAL* Q, i
             }
         }
     }
-
+    __syncthreads();
+    
     int nx_left = (ex - 1 + nx) % nx; int n_elem_xL = nx_left + nx * (ey + ny * ez);
     for (int v = 0; v < 5; ++v) s_neigh[v][pt] = U[v * total_points + n_elem_xL * 64 + pt];
     __syncthreads();
@@ -105,6 +106,7 @@ extern "C" __global__ void compute_gradient_kernel(const U_REAL* U, Q_REAL* Q, i
             }
         }
     }
+    __syncthreads();
 
     if (ey == 0) {
         if (pt < 16) {
@@ -177,6 +179,7 @@ extern "C" __global__ void compute_gradient_kernel(const U_REAL* U, Q_REAL* Q, i
             }
         }
     }
+    __syncthreads();
     
     int nz_left = (ez - 1 + nz) % nz; int n_elem_zL = ex + nx * (ey + ny * nz_left);
     for (int v = 0; v < 5; ++v) s_neigh[v][pt] = U[v * total_points + n_elem_zL * 64 + pt];

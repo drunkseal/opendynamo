@@ -162,6 +162,9 @@ pub fn run_solver_generic<
         let n_steps = config.solver.n_steps;
         let rhs_cfg = cudarc::driver::LaunchConfig { grid_dim: (num_elements as u32, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
         let add_cfg = cudarc::driver::LaunchConfig::for_num_elems(state_size as u32);
+        let face_x_cfg = cudarc::driver::LaunchConfig { grid_dim: ((num_elements as u32 + 3) / 4, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
+        let face_y_cfg = cudarc::driver::LaunchConfig { grid_dim: (nx as u32 * ((ny as u32 + 3) / 4) * nz as u32, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
+        let face_z_cfg = cudarc::driver::LaunchConfig { grid_dim: (nx as u32 * ny as u32 * ((nz as u32 + 3) / 4), 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
         
         let ss_i32 = state_size as i32;
         
@@ -185,19 +188,17 @@ pub fn run_solver_generic<
             args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_v.launch(rhs_cfg)? };
             
-            let face_cfg = cudarc::driver::LaunchConfig { grid_dim: ((num_elements as u32 + 3) / 4, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
-            
             let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
             args_x.arg(&d_u).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_x.launch(face_cfg)? };
+            unsafe { args_x.launch(face_x_cfg)? };
             
             let mut args_y = stream.launch_builder(&compute_face_flux_y_kernel);
             args_y.arg(&d_u).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_y.launch(face_cfg)? };
+            unsafe { args_y.launch(face_y_cfg)? };
             
             let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
             args_z.arg(&d_u).arg(&d_j_z_l).arg(&d_j_z_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_z.launch(face_cfg)? };
+            unsafe { args_z.launch(face_z_cfg)? };
             let mut args_corr = stream.launch_builder(&apply_corrections_kernel);
             args_corr.arg(&mut d_rhs).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_corr.launch(rhs_cfg)? };
@@ -216,19 +217,17 @@ let a1 = COMP::from_f64(1.0); let b1 = COMP::from_f64(0.0); let c1 = dt;
             args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_v.launch(rhs_cfg)? };
             
-            let face_cfg = cudarc::driver::LaunchConfig { grid_dim: ((num_elements as u32 + 3) / 4, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
-            
             let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
             args_x.arg(&d_u).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_x.launch(face_cfg)? };
+            unsafe { args_x.launch(face_x_cfg)? };
             
             let mut args_y = stream.launch_builder(&compute_face_flux_y_kernel);
             args_y.arg(&d_u).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_y.launch(face_cfg)? };
+            unsafe { args_y.launch(face_y_cfg)? };
             
             let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
             args_z.arg(&d_u).arg(&d_j_z_l).arg(&d_j_z_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_z.launch(face_cfg)? };
+            unsafe { args_z.launch(face_z_cfg)? };
             let mut args_corr = stream.launch_builder(&apply_corrections_kernel);
             args_corr.arg(&mut d_rhs).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_corr.launch(rhs_cfg)? };
@@ -247,19 +246,17 @@ let a2 = COMP::from_f64(0.75); let b2 = COMP::from_f64(0.25); let c2 = COMP::fro
             args_v.arg(&d_u).arg(&mut d_rhs).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_v.launch(rhs_cfg)? };
             
-            let face_cfg = cudarc::driver::LaunchConfig { grid_dim: ((num_elements as u32 + 3) / 4, 1, 1), block_dim: (64, 1, 1), shared_mem_bytes: 0 };
-            
             let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
             args_x.arg(&d_u).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_x.launch(face_cfg)? };
+            unsafe { args_x.launch(face_x_cfg)? };
             
             let mut args_y = stream.launch_builder(&compute_face_flux_y_kernel);
             args_y.arg(&d_u).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_y.launch(face_cfg)? };
+            unsafe { args_y.launch(face_y_cfg)? };
             
             let mut args_z = stream.launch_builder(&compute_face_flux_z_kernel);
             args_z.arg(&d_u).arg(&d_j_z_l).arg(&d_j_z_r).arg(&d_q).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
-            unsafe { args_z.launch(face_cfg)? };
+            unsafe { args_z.launch(face_z_cfg)? };
             let mut args_corr = stream.launch_builder(&apply_corrections_kernel);
             args_corr.arg(&mut d_rhs).arg(&d_j_x_l).arg(&d_j_x_r).arg(&d_j_y_l).arg(&d_j_y_r).arg(&d_j_z_l).arg(&d_j_z_r).arg(&nx_i32).arg(&ny_i32).arg(&nz_i32);
             unsafe { args_corr.launch(rhs_cfg)? };
