@@ -147,8 +147,8 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     
     #pragma unroll
     for (int v = 0; v < 5; ++v) {
-        typename V4Type<U_REAL>::type ul = ld4(U + v * total_points + base_L);
         typename V4Type<U_REAL>::type ur = ld4(U + v * total_points + base_R);
+        typename V4Type<U_REAL>::type ul = ld4(U + v * total_points + base_L);
         u_L[v] = (COMPUTE_REAL)ul.x * c_extrap_right[0] + (COMPUTE_REAL)ul.y * c_extrap_right[1]
                + (COMPUTE_REAL)ul.z * c_extrap_right[2] + (COMPUTE_REAL)ul.w * c_extrap_right[3];
         u_R[v] = (COMPUTE_REAL)ur.x * c_extrap_left[0] + (COMPUTE_REAL)ur.y * c_extrap_left[1]
@@ -157,8 +157,8 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     #pragma unroll
     for (int v = 0; v < 15; ++v) {
         if (v == 8 || v == 10 || v == 13 || v == 14) continue; // unused by viscous x-flux
-        typename V4Type<Q_REAL>::type ql = ld4(Q + v * total_points + base_L);
         typename V4Type<Q_REAL>::type qr = ld4(Q + v * total_points + base_R);
+        typename V4Type<Q_REAL>::type ql = ld4(Q + v * total_points + base_L);
         q_L[v] = (COMPUTE_REAL)ql.x * c_extrap_right[0] + (COMPUTE_REAL)ql.y * c_extrap_right[1]
                + (COMPUTE_REAL)ql.z * c_extrap_right[2] + (COMPUTE_REAL)ql.w * c_extrap_right[3];
         q_R[v] = (COMPUTE_REAL)qr.x * c_extrap_left[0] + (COMPUTE_REAL)qr.y * c_extrap_left[1]
@@ -329,13 +329,13 @@ extern "C" __global__ void compute_face_flux_z_kernel(const U_REAL* U, COMPUTE_R
         COMPUTE_REAL c_L = c_extrap_left[m];
         
         for (int v = 0; v < 5; ++v) {
-            u_L[v] += U[v * total_points + idx_L] * c_R;
             u_R[v] += U[v * total_points + idx_R] * c_L;
+            u_L[v] += U[v * total_points + idx_L] * c_R;
         }
         for (int v = 0; v < 15; ++v) {
             if (v == 4 || v == 6 || v == 12 || v == 13) continue; // unused by viscous z-flux
-            q_L[v] += Q[v * total_points + idx_L] * c_R;
             q_R[v] += Q[v * total_points + idx_R] * c_L;
+            q_L[v] += Q[v * total_points + idx_L] * c_R;
         }
     }
     
