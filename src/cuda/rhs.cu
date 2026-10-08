@@ -145,24 +145,40 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     int base_L = elem_L * 64 + 4 * pt;
     int base_R = elem_R * 64 + 4 * pt;
     
+    typename V4Type<U_REAL>::type U_r[5], U_l[5];
+    #pragma unroll
+    for (int v = 0; v < 5; ++v) U_r[v] = ld4(U + v * total_points + base_R);
+    #pragma unroll
+    for (int v = 0; v < 5; ++v) U_l[v] = ld4(U + v * total_points + base_L);
     #pragma unroll
     for (int v = 0; v < 5; ++v) {
-        typename V4Type<U_REAL>::type ur = ld4(U + v * total_points + base_R);
-        typename V4Type<U_REAL>::type ul = ld4(U + v * total_points + base_L);
-        u_L[v] = (COMPUTE_REAL)ul.x * c_extrap_right[0] + (COMPUTE_REAL)ul.y * c_extrap_right[1]
-               + (COMPUTE_REAL)ul.z * c_extrap_right[2] + (COMPUTE_REAL)ul.w * c_extrap_right[3];
-        u_R[v] = (COMPUTE_REAL)ur.x * c_extrap_left[0] + (COMPUTE_REAL)ur.y * c_extrap_left[1]
-               + (COMPUTE_REAL)ur.z * c_extrap_left[2] + (COMPUTE_REAL)ur.w * c_extrap_left[3];
+        u_L[v] = (COMPUTE_REAL)U_l[v].x * c_extrap_right[0] + (COMPUTE_REAL)U_l[v].y * c_extrap_right[1]
+               + (COMPUTE_REAL)U_l[v].z * c_extrap_right[2] + (COMPUTE_REAL)U_l[v].w * c_extrap_right[3];
+        u_R[v] = (COMPUTE_REAL)U_r[v].x * c_extrap_left[0] + (COMPUTE_REAL)U_r[v].y * c_extrap_left[1]
+               + (COMPUTE_REAL)U_r[v].z * c_extrap_left[2] + (COMPUTE_REAL)U_r[v].w * c_extrap_left[3];
     }
+    typename V4Type<Q_REAL>::type Q_r[11], Q_l[11];
+    int qi = 0;
     #pragma unroll
     for (int v = 0; v < 15; ++v) {
-        if (v == 8 || v == 10 || v == 13 || v == 14) continue; // unused by viscous x-flux
-        typename V4Type<Q_REAL>::type qr = ld4(Q + v * total_points + base_R);
-        typename V4Type<Q_REAL>::type ql = ld4(Q + v * total_points + base_L);
-        q_L[v] = (COMPUTE_REAL)ql.x * c_extrap_right[0] + (COMPUTE_REAL)ql.y * c_extrap_right[1]
-               + (COMPUTE_REAL)ql.z * c_extrap_right[2] + (COMPUTE_REAL)ql.w * c_extrap_right[3];
-        q_R[v] = (COMPUTE_REAL)qr.x * c_extrap_left[0] + (COMPUTE_REAL)qr.y * c_extrap_left[1]
-               + (COMPUTE_REAL)qr.z * c_extrap_left[2] + (COMPUTE_REAL)qr.w * c_extrap_left[3];
+        if (v == 8 || v == 10 || v == 13 || v == 14) continue;
+        Q_r[qi] = ld4(Q + v * total_points + base_R); ++qi;
+    }
+    qi = 0;
+    #pragma unroll
+    for (int v = 0; v < 15; ++v) {
+        if (v == 8 || v == 10 || v == 13 || v == 14) continue;
+        Q_l[qi] = ld4(Q + v * total_points + base_L); ++qi;
+    }
+    qi = 0;
+    #pragma unroll
+    for (int v = 0; v < 15; ++v) {
+        if (v == 8 || v == 10 || v == 13 || v == 14) continue;
+        q_L[v] = (COMPUTE_REAL)Q_l[qi].x * c_extrap_right[0] + (COMPUTE_REAL)Q_l[qi].y * c_extrap_right[1]
+               + (COMPUTE_REAL)Q_l[qi].z * c_extrap_right[2] + (COMPUTE_REAL)Q_l[qi].w * c_extrap_right[3];
+        q_R[v] = (COMPUTE_REAL)Q_r[qi].x * c_extrap_left[0] + (COMPUTE_REAL)Q_r[qi].y * c_extrap_left[1]
+               + (COMPUTE_REAL)Q_r[qi].z * c_extrap_left[2] + (COMPUTE_REAL)Q_r[qi].w * c_extrap_left[3];
+        ++qi;
     }
     
     COMPUTE_REAL F_inv[5], F_v_L[5], F_v_R[5], F_i_L[5], F_i_R[5];
