@@ -156,6 +156,7 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
     }
     #pragma unroll
     for (int v = 0; v < 15; ++v) {
+        if (v == 8 || v == 10 || v == 13 || v == 14) continue; // unused by viscous x-flux
         typename V4Type<Q_REAL>::type ql = ld4(Q + v * total_points + base_L);
         typename V4Type<Q_REAL>::type qr = ld4(Q + v * total_points + base_R);
         q_L[v] = (COMPUTE_REAL)ql.x * c_extrap_right[0] + (COMPUTE_REAL)ql.y * c_extrap_right[1]
@@ -221,24 +222,51 @@ extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_R
     COMPUTE_REAL u_L[5] = {0}, q_L[15] = {0};
     COMPUTE_REAL u_R[5] = {0}, q_R[15] = {0};
     
-    int f1 = pt % 4; // i
-    int f2 = pt / 4; // k
+    // Thread role remap: pt = m + 4*k where m = element j (extrap var), k = face point k.
+    // ld4 reads points i'=0..3 (contiguous) at (m, k); quad (xor1, xor2) = m-set at fixed k.
+    // After reduce, lane picks component i = pt & 3 = output face point i.
+    int m = pt & 3;
+    int k = pt >> 2;
+    const unsigned full_mask = 0xffffffffu;
+    int base_L = elem_L * 64 + (m * 4 + k * 16);
+    int base_R = elem_R * 64 + (m * 4 + k * 16);
+    COMPUTE_REAL c_R = c_extrap_right[m];
+    COMPUTE_REAL c_L = c_extrap_left[m];
     
-    for (int m = 0; m < 4; ++m) {
-        int idx_L = elem_L * 64 + (f1 + m * 4 + f2 * 16);
-        int idx_R = elem_R * 64 + (f1 + m * 4 + f2 * 16);
-        
-        COMPUTE_REAL c_R = c_extrap_right[m];
-        COMPUTE_REAL c_L = c_extrap_left[m];
-        
-        for (int v = 0; v < 5; ++v) {
-            u_L[v] += U[v * total_points + idx_L] * c_R;
-            u_R[v] += U[v * total_points + idx_R] * c_L;
-        }
-        for (int v = 0; v < 15; ++v) {
-            q_L[v] += Q[v * total_points + idx_L] * c_R;
-            q_R[v] += Q[v * total_points + idx_R] * c_L;
-        }
+    #pragma unroll
+    for (int v = 0; v < 5; ++v) {
+        typename V4Type<U_REAL>::type fr = ld4(U + v * total_points + base_R);
+        typename V4Type<U_REAL>::type fl = ld4(U + v * total_points + base_L);
+        COMPUTE_REAL sL0 = (COMPUTE_REAL)fl.x * c_R, sL1 = (COMPUTE_REAL)fl.y * c_R, sL2 = (COMPUTE_REAL)fl.z * c_R, sL3 = (COMPUTE_REAL)fl.w * c_R;
+        COMPUTE_REAL sR0 = (COMPUTE_REAL)fr.x * c_L, sR1 = (COMPUTE_REAL)fr.y * c_L, sR2 = (COMPUTE_REAL)fr.z * c_L, sR3 = (COMPUTE_REAL)fr.w * c_L;
+        sL0 += __shfl_xor_sync(full_mask, sL0, 1); sR0 += __shfl_xor_sync(full_mask, sR0, 1);
+        sL1 += __shfl_xor_sync(full_mask, sL1, 1); sR1 += __shfl_xor_sync(full_mask, sR1, 1);
+        sL2 += __shfl_xor_sync(full_mask, sL2, 1); sR2 += __shfl_xor_sync(full_mask, sR2, 1);
+        sL3 += __shfl_xor_sync(full_mask, sL3, 1); sR3 += __shfl_xor_sync(full_mask, sR3, 1);
+        sL0 += __shfl_xor_sync(full_mask, sL0, 2); sR0 += __shfl_xor_sync(full_mask, sR0, 2);
+        sL1 += __shfl_xor_sync(full_mask, sL1, 2); sR1 += __shfl_xor_sync(full_mask, sR1, 2);
+        sL2 += __shfl_xor_sync(full_mask, sL2, 2); sR2 += __shfl_xor_sync(full_mask, sR2, 2);
+        sL3 += __shfl_xor_sync(full_mask, sL3, 2); sR3 += __shfl_xor_sync(full_mask, sR3, 2);
+        u_L[v] = (m == 0) ? sL0 : (m == 1) ? sL1 : (m == 2) ? sL2 : sL3;
+        u_R[v] = (m == 0) ? sR0 : (m == 1) ? sR1 : (m == 2) ? sR2 : sR3;
+    }
+    #pragma unroll
+    for (int v = 0; v < 15; ++v) {
+        if (v == 5 || v == 9 || v == 12 || v == 14) continue; // unused by viscous y-flux
+        typename V4Type<Q_REAL>::type fr = ld4(Q + v * total_points + base_R);
+        typename V4Type<Q_REAL>::type fl = ld4(Q + v * total_points + base_L);
+        COMPUTE_REAL sL0 = (COMPUTE_REAL)fl.x * c_R, sL1 = (COMPUTE_REAL)fl.y * c_R, sL2 = (COMPUTE_REAL)fl.z * c_R, sL3 = (COMPUTE_REAL)fl.w * c_R;
+        COMPUTE_REAL sR0 = (COMPUTE_REAL)fr.x * c_L, sR1 = (COMPUTE_REAL)fr.y * c_L, sR2 = (COMPUTE_REAL)fr.z * c_L, sR3 = (COMPUTE_REAL)fr.w * c_L;
+        sL0 += __shfl_xor_sync(full_mask, sL0, 1); sR0 += __shfl_xor_sync(full_mask, sR0, 1);
+        sL1 += __shfl_xor_sync(full_mask, sL1, 1); sR1 += __shfl_xor_sync(full_mask, sR1, 1);
+        sL2 += __shfl_xor_sync(full_mask, sL2, 1); sR2 += __shfl_xor_sync(full_mask, sR2, 1);
+        sL3 += __shfl_xor_sync(full_mask, sL3, 1); sR3 += __shfl_xor_sync(full_mask, sR3, 1);
+        sL0 += __shfl_xor_sync(full_mask, sL0, 2); sR0 += __shfl_xor_sync(full_mask, sR0, 2);
+        sL1 += __shfl_xor_sync(full_mask, sL1, 2); sR1 += __shfl_xor_sync(full_mask, sR1, 2);
+        sL2 += __shfl_xor_sync(full_mask, sL2, 2); sR2 += __shfl_xor_sync(full_mask, sR2, 2);
+        sL3 += __shfl_xor_sync(full_mask, sL3, 2); sR3 += __shfl_xor_sync(full_mask, sR3, 2);
+        q_L[v] = (m == 0) ? sL0 : (m == 1) ? sL1 : (m == 2) ? sL2 : sL3;
+        q_R[v] = (m == 0) ? sR0 : (m == 1) ? sR1 : (m == 2) ? sR2 : sR3;
     }
     
     COMPUTE_REAL F_inv[5], F_v_L[5], F_v_R[5], F_i_L[5], F_i_R[5];
@@ -305,6 +333,7 @@ extern "C" __global__ void compute_face_flux_z_kernel(const U_REAL* U, COMPUTE_R
             u_R[v] += U[v * total_points + idx_R] * c_L;
         }
         for (int v = 0; v < 15; ++v) {
+            if (v == 4 || v == 6 || v == 12 || v == 13) continue; // unused by viscous z-flux
             q_L[v] += Q[v * total_points + idx_L] * c_R;
             q_R[v] += Q[v * total_points + idx_R] * c_L;
         }
