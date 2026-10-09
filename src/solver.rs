@@ -2,7 +2,7 @@ use cudarc::driver::PushKernelArg;
 
 use crate::config::{FluxScheme, InitialCondition, ViscosityModel, YBoundary};
 use crate::constants::{
-    FACES_PER_BLOCK, FR_ORDER, INIT_OUTPUT_STEP, N_Q_COMPONENTS, N_VARS, PTS_PER_ELEM, PTS_PER_FACE,
+    FACES_PER_BLOCK, FR_ORDER, INIT_OUTPUT_STEP, N_VARS, PTS_PER_ELEM, PTS_PER_FACE,
 };
 
 pub trait PrecisionType:
@@ -99,11 +99,10 @@ pub fn run_solver_generic<
     );
 
     let ptx_source = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         include_str!("cuda/constants.cuh"),
         include_str!("cuda/device_functions.cuh"),
         include_str!("cuda/init.cu"),
-        include_str!("cuda/gradient.cu"),
         include_str!("cuda/rhs.cu"),
         include_str!("cuda/rk.cu")
     );
@@ -112,7 +111,6 @@ pub fn run_solver_generic<
     let module = ctx.load_module(ptx)?;
 
     let init_flow_kernel = module.load_function("init_flow_kernel")?;
-    let compute_gradient_kernel = module.load_function("compute_gradient_kernel")?;
     let compute_rhs_volume_kernel = module.load_function("compute_rhs_volume_kernel")?;
     let compute_face_flux_x_kernel = module.load_function("compute_face_flux_x_kernel")?;
     let compute_face_flux_y_kernel = module.load_function("compute_face_flux_y_kernel")?;
@@ -168,14 +166,12 @@ pub fn run_solver_generic<
     let num_elements = nx * ny * nz;
     let total_points = num_elements * PTS_PER_ELEM;
     let state_size = total_points * N_VARS;
-    let q_size = total_points * N_Q_COMPONENTS;
 
     println!("Allocating device memory for {num_elements} elements, total DOFs: {total_points}");
 
     let mut d_u = stream.alloc_zeros::<U>(state_size)?;
     let mut d_u0 = stream.alloc_zeros::<U>(state_size)?;
     let mut d_rhs = stream.alloc_zeros::<RHS>(state_size)?;
-    let mut d_q = stream.alloc_zeros::<Q>(q_size)?;
     let face_array_size = num_elements * PTS_PER_FACE * N_VARS;
     let d_j_x_l = stream.alloc_zeros::<COMP>(face_array_size)?;
     let d_j_x_r = stream.alloc_zeros::<COMP>(face_array_size)?;
@@ -183,6 +179,15 @@ pub fn run_solver_generic<
     let d_j_y_r = stream.alloc_zeros::<COMP>(face_array_size)?;
     let d_j_z_l = stream.alloc_zeros::<COMP>(face_array_size)?;
     let d_j_z_r = stream.alloc_zeros::<COMP>(face_array_size)?;
+    // Gradient boundary slices: pre-extrapolated Q values for the face kernels,
+    // written by compute_rhs_volume_kernel (the global Q array is gone).
+    let slice_array_size = num_elements * PTS_PER_FACE * 12;
+    let g_x_l = stream.alloc_zeros::<COMP>(slice_array_size)?;
+    let g_x_r = stream.alloc_zeros::<COMP>(slice_array_size)?;
+    let g_y_l = stream.alloc_zeros::<COMP>(slice_array_size)?;
+    let g_y_r = stream.alloc_zeros::<COMP>(slice_array_size)?;
+    let g_z_l = stream.alloc_zeros::<COMP>(slice_array_size)?;
+    let g_z_r = stream.alloc_zeros::<COMP>(slice_array_size)?;
 
     let io_stream = ctx.new_stream()?;
 
@@ -246,29 +251,37 @@ pub fn run_solver_generic<
 
     let ss_i32 = state_size as i32;
 
-    // One RK stage's PDE work: gradient, three face directions, fused volume RHS.
+    // One RK stage's PDE work: the fused gradient+volume kernel (writes the
+    // gradient boundary slices), then the three face directions (read slices,
+    // write the j arrays consumed by the RK kernels).
     let launch_rhs_stage = |d_u: &cudarc::driver::CudaSlice<U>,
-                            d_q: &mut cudarc::driver::CudaSlice<Q>,
                             d_rhs: &mut cudarc::driver::CudaSlice<RHS>|
      -> Result<(), Box<dyn std::error::Error>> {
-        let mut args_grad = stream.launch_builder(&compute_gradient_kernel);
-        args_grad
+        let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
+        args_v
             .arg(d_u)
-            .arg(&mut *d_q)
+            .arg(&mut *d_rhs)
+            .arg(&g_x_l)
+            .arg(&g_x_r)
+            .arg(&g_y_l)
+            .arg(&g_y_r)
+            .arg(&g_z_l)
+            .arg(&g_z_r)
             .arg(&nx_i32)
             .arg(&ny_i32)
             .arg(&nz_i32)
             .arg(&lx)
             .arg(&ly)
             .arg(&lz);
-        unsafe { args_grad.launch(rhs_cfg)? };
+        unsafe { args_v.launch(rhs_cfg)? };
 
         let mut args_x = stream.launch_builder(&compute_face_flux_x_kernel);
         args_x
             .arg(d_u)
             .arg(&d_j_x_l)
             .arg(&d_j_x_r)
-            .arg(&*d_q)
+            .arg(&g_x_l)
+            .arg(&g_x_r)
             .arg(&nx_i32)
             .arg(&ny_i32)
             .arg(&nz_i32)
@@ -280,7 +293,8 @@ pub fn run_solver_generic<
             .arg(d_u)
             .arg(&d_j_y_l)
             .arg(&d_j_y_r)
-            .arg(&*d_q)
+            .arg(&g_y_l)
+            .arg(&g_y_r)
             .arg(&nx_i32)
             .arg(&ny_i32)
             .arg(&nz_i32)
@@ -292,18 +306,30 @@ pub fn run_solver_generic<
             .arg(d_u)
             .arg(&d_j_z_l)
             .arg(&d_j_z_r)
-            .arg(&*d_q)
+            .arg(&g_z_l)
+            .arg(&g_z_r)
             .arg(&nx_i32)
             .arg(&ny_i32)
             .arg(&nz_i32)
             .arg(&lz);
         unsafe { args_z.launch(face_z_cfg)? };
+        Ok(())
+    };
 
-        let mut args_v = stream.launch_builder(&compute_rhs_volume_kernel);
-        args_v
-            .arg(d_u)
-            .arg(&mut *d_rhs)
-            .arg(&*d_q)
+    let mut io_threads = vec![];
+
+    println!("Starting RK3 explicit time integration...");
+    let start_time = std::time::Instant::now();
+    for step in 0..n_steps {
+        // Stage 1
+        launch_rhs_stage(&d_u, &mut d_rhs)?;
+        let a1 = COMP::from_f64(1.0);
+        let c1 = dt;
+        let mut args_rk1 = stream.launch_builder(&rk_stage1_kernel);
+        args_rk1
+            .arg(&mut d_u0)
+            .arg(&d_u)
+            .arg(&d_rhs)
             .arg(&d_j_x_l)
             .arg(&d_j_x_r)
             .arg(&d_j_y_l)
@@ -315,25 +341,7 @@ pub fn run_solver_generic<
             .arg(&nz_i32)
             .arg(&lx)
             .arg(&ly)
-            .arg(&lz);
-        unsafe { args_v.launch(rhs_cfg)? };
-        Ok(())
-    };
-
-    let mut io_threads = vec![];
-
-    println!("Starting RK3 explicit time integration...");
-    let start_time = std::time::Instant::now();
-    for step in 0..n_steps {
-        // Stage 1
-        launch_rhs_stage(&d_u, &mut d_q, &mut d_rhs)?;
-        let a1 = COMP::from_f64(1.0);
-        let c1 = dt;
-        let mut args_rk1 = stream.launch_builder(&rk_stage1_kernel);
-        args_rk1
-            .arg(&mut d_u0)
-            .arg(&d_u)
-            .arg(&d_rhs)
+            .arg(&lz)
             .arg(&a1)
             .arg(&c1)
             .arg(&ss_i32);
@@ -341,7 +349,7 @@ pub fn run_solver_generic<
         std::mem::swap(&mut d_u, &mut d_u0);
 
         // Stage 2
-        launch_rhs_stage(&d_u, &mut d_q, &mut d_rhs)?;
+        launch_rhs_stage(&d_u, &mut d_rhs)?;
         let a2 = COMP::from_f64(0.75);
         let b2 = COMP::from_f64(0.25);
         let c2 = COMP::from_f64(0.25) * dt;
@@ -350,6 +358,18 @@ pub fn run_solver_generic<
             .arg(&mut d_u)
             .arg(&d_u0)
             .arg(&d_rhs)
+            .arg(&d_j_x_l)
+            .arg(&d_j_x_r)
+            .arg(&d_j_y_l)
+            .arg(&d_j_y_r)
+            .arg(&d_j_z_l)
+            .arg(&d_j_z_r)
+            .arg(&nx_i32)
+            .arg(&ny_i32)
+            .arg(&nz_i32)
+            .arg(&lx)
+            .arg(&ly)
+            .arg(&lz)
             .arg(&a2)
             .arg(&b2)
             .arg(&c2)
@@ -357,7 +377,7 @@ pub fn run_solver_generic<
         unsafe { args_rk2.launch(add_cfg)? };
 
         // Stage 3
-        launch_rhs_stage(&d_u, &mut d_q, &mut d_rhs)?;
+        launch_rhs_stage(&d_u, &mut d_rhs)?;
         let a3 = COMP::from_f64(1.0 / 3.0);
         let b3 = COMP::from_f64(2.0 / 3.0);
         let c3 = COMP::from_f64(2.0 / 3.0) * dt;
@@ -366,6 +386,18 @@ pub fn run_solver_generic<
             .arg(&mut d_u)
             .arg(&d_u0)
             .arg(&d_rhs)
+            .arg(&d_j_x_l)
+            .arg(&d_j_x_r)
+            .arg(&d_j_y_l)
+            .arg(&d_j_y_r)
+            .arg(&d_j_z_l)
+            .arg(&d_j_z_r)
+            .arg(&nx_i32)
+            .arg(&ny_i32)
+            .arg(&nz_i32)
+            .arg(&lx)
+            .arg(&ly)
+            .arg(&lz)
             .arg(&a3)
             .arg(&b3)
             .arg(&c3)
@@ -412,6 +444,7 @@ pub fn run_solver_generic<
     }
 
     stream.synchronize()?;
+
     let elapsed = start_time.elapsed();
     println!(
         "Simulation finished in {:.3} seconds.",

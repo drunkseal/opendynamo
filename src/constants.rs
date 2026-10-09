@@ -10,8 +10,6 @@ pub const PTS_PER_ELEM: usize = (FR_ORDER + 1) * (FR_ORDER + 1) * (FR_ORDER + 1)
 pub const PTS_PER_FACE: usize = (FR_ORDER + 1) * (FR_ORDER + 1);
 /// Conservative variables (rho, rho*u, rho*v, rho*w, rho*E).
 pub const N_VARS: usize = 5;
-/// Primitive gradients: 5 variables x 3 directions.
-pub const N_Q_COMPONENTS: usize = 15;
 /// Faces grouped per thread block for in-block cache reuse.
 pub const FACES_PER_BLOCK: usize = PTS_PER_ELEM / PTS_PER_FACE;
 /// Step label used for the initial-condition output file.
