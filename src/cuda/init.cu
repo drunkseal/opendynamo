@@ -8,12 +8,12 @@ extern "C" __global__ void init_flow_kernel(U_REAL* U, int nx, int ny, int nz, C
     if (idx < total_points) {
         COMPUTE_REAL u_vel;
 #if INIT_CHANNEL
-        int ey = (elem_idx / nx) % ny;
+        int elem_y = (elem_idx / nx) % ny;
         int j = (pt / NPTS1D) % NPTS1D; // y-index of the point
 
         COMPUTE_REAL dy = ly / ((COMPUTE_REAL)ny);
         COMPUTE_REAL y_wall = ((COMPUTE_REAL)0.5) * ly;
-        COMPUTE_REAL y = -y_wall + dy * (ey + ((COMPUTE_REAL)0.5) + ((COMPUTE_REAL)0.5) * c_points[j]);
+        COMPUTE_REAL y = -y_wall + dy * (elem_y + ((COMPUTE_REAL)0.5) + ((COMPUTE_REAL)0.5) * c_points[j]);
         COMPUTE_REAL eta = y / y_wall;
         u_vel = ((COMPUTE_REAL)1.5) * mach_bulk * (((COMPUTE_REAL)1.0) - eta * eta);
 #else

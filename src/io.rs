@@ -32,7 +32,7 @@ pub fn save_hdf5_xdmf<T: hdf5::H5Type>(
 
     dataset.write(u_data)?;
 
-    let prec = std::mem::size_of::<T>();
+    let precision = std::mem::size_of::<T>();
 
     // Write XDMF file pointing to the HDF5 dataset
     let xdmf_content = format!(
@@ -63,7 +63,7 @@ pub fn save_hdf5_xdmf<T: hdf5::H5Type>(
         ny + 1,
         nx + 1,
         total_elements,
-        prec,
+        precision,
         h5_filename
     );
 
