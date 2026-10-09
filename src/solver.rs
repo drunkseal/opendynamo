@@ -287,7 +287,9 @@ fn nvrtc_options<U: PrecisionType, Q: PrecisionType, RHS: PrecisionType, COMP: P
     config: &crate::config::OpenDynamoConfig,
 ) -> cudarc::nvrtc::CompileOptions {
     let mut opts = cudarc::nvrtc::CompileOptions::default();
-    opts.options.push("--use_fast_math".to_string());
+    if config.solver.fast_math {
+        opts.options.push("--use_fast_math".to_string());
+    }
     opts.options.push(format!("-DU_REAL={}", U::c_type()));
     opts.options.push(format!("-DQ_REAL={}", Q::c_type()));
     opts.options.push(format!("-DRHS_REAL={}", RHS::c_type()));

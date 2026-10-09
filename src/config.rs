@@ -86,6 +86,10 @@ fn default_s_suth() -> f32 {
     110.4
 }
 
+fn default_fast_math() -> bool {
+    true
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct PhysicsConfig {
     pub mach_bulk: f32,
@@ -117,6 +121,8 @@ pub struct SolverConfig {
     pub n_steps: usize,
     pub dt: f32,
     pub flux_scheme: FluxScheme,
+    #[serde(default = "default_fast_math")]
+    pub fast_math: bool,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
