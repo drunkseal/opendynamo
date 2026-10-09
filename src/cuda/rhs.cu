@@ -484,7 +484,7 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
         grad_x_left + ((size_t)elem_right * NPTS_FACE + pt) * 12,
         grad_left, grad_right);
 
-    COMPUTE_REAL normal[3] = {1.0, 0.0, 0.0};
+    COMPUTE_REAL normal[3] = {((COMPUTE_REAL)1.0), ((COMPUTE_REAL)0.0), ((COMPUTE_REAL)0.0)};
     int num_faces_total = nx * ny * nz * NPTS_FACE;
     compute_face_j<flux_dir_x>(u_left, u_right, grad_left, grad_right, normal,
         j_x_right, j_x_left, elem_left, elem_right, pt, num_faces_total);
@@ -558,7 +558,7 @@ extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_R
         grad_y_left + ((size_t)elem_right * NPTS_FACE + pt) * 12,
         grad_left, grad_right);
 
-    COMPUTE_REAL normal[3] = {0.0, 1.0, 0.0};
+    COMPUTE_REAL normal[3] = {((COMPUTE_REAL)0.0), ((COMPUTE_REAL)1.0), ((COMPUTE_REAL)0.0)};
     int num_faces_total = nx * ny * nz * NPTS_FACE;
     compute_face_j<flux_dir_y>(u_left, u_right, grad_left, grad_right, normal,
         j_y_right, j_y_left, elem_left, elem_right, pt, num_faces_total);
@@ -599,8 +599,8 @@ extern "C" __global__ void compute_face_flux_z_kernel(const U_REAL* U, COMPUTE_R
         COMPUTE_REAL coeff_left = c_extrap_left[m];
 
         for (int v = 0; v < 5; ++v) {
-            u_right[v] += U[v * total_points + point_right] * coeff_left;
-            u_left[v] += U[v * total_points + point_left] * coeff_right;
+            u_right[v] += (COMPUTE_REAL)U[v * total_points + point_right] * coeff_left;
+            u_left[v] += (COMPUTE_REAL)U[v * total_points + point_left] * coeff_right;
         }
     }
     // Gradient boundary slices: grad_left = elem_left's +side extrap, grad_right = elem_right's -side extrap.
@@ -610,7 +610,7 @@ extern "C" __global__ void compute_face_flux_z_kernel(const U_REAL* U, COMPUTE_R
         grad_z_left + ((size_t)elem_right * NPTS_FACE + pt) * 12,
         grad_left, grad_right);
 
-    COMPUTE_REAL normal[3] = {0.0, 0.0, 1.0};
+    COMPUTE_REAL normal[3] = {((COMPUTE_REAL)0.0), ((COMPUTE_REAL)0.0), ((COMPUTE_REAL)1.0)};
     int num_faces_total = nx * ny * nz * NPTS_FACE;
     compute_face_j<flux_dir_z>(u_left, u_right, grad_left, grad_right, normal,
         j_z_right, j_z_left, elem_left, elem_right, pt, num_faces_total);

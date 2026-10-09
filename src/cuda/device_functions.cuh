@@ -152,27 +152,27 @@ __device__ inline void ausm_plus_flux(const COMPUTE_REAL* state_left, const COMP
     COMPUTE_REAL alpha = ((COMPUTE_REAL)0.1875);
     COMPUTE_REAL beta = ((COMPUTE_REAL)0.125);
     
-    if (fabs(mach_left) >= 1.0) {
+    if (fabs(mach_left) >= ((COMPUTE_REAL)1.0)) {
         mach_plus = ((COMPUTE_REAL)0.5) * (mach_left + fabs(mach_left));
-        p_plus = (mach_left > 0.0) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
+        p_plus = (mach_left > ((COMPUTE_REAL)0.0)) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
     } else {
-        mach_plus = ((COMPUTE_REAL)0.25) * (mach_left + 1.0) * (mach_left + 1.0) + beta * (mach_left * mach_left - 1.0) * (mach_left * mach_left - 1.0);
-        p_plus = ((COMPUTE_REAL)0.25) * (mach_left + 1.0) * (mach_left + 1.0) * (((COMPUTE_REAL)2.0) - mach_left) + alpha * mach_left * (mach_left * mach_left - 1.0) * (mach_left * mach_left - 1.0);
+        mach_plus = ((COMPUTE_REAL)0.25) * (mach_left + ((COMPUTE_REAL)1.0)) * (mach_left + ((COMPUTE_REAL)1.0)) + beta * (mach_left * mach_left - ((COMPUTE_REAL)1.0)) * (mach_left * mach_left - ((COMPUTE_REAL)1.0));
+        p_plus = ((COMPUTE_REAL)0.25) * (mach_left + ((COMPUTE_REAL)1.0)) * (mach_left + ((COMPUTE_REAL)1.0)) * (((COMPUTE_REAL)2.0) - mach_left) + alpha * mach_left * (mach_left * mach_left - ((COMPUTE_REAL)1.0)) * (mach_left * mach_left - ((COMPUTE_REAL)1.0));
     }
     
-    if (fabs(mach_right) >= 1.0) {
+    if (fabs(mach_right) >= ((COMPUTE_REAL)1.0)) {
         mach_minus = ((COMPUTE_REAL)0.5) * (mach_right - fabs(mach_right));
-        p_minus = (mach_right < 0.0) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
+        p_minus = (mach_right < ((COMPUTE_REAL)0.0)) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
     } else {
-        mach_minus = -((COMPUTE_REAL)0.25) * (mach_right - 1.0) * (mach_right - 1.0) - beta * (mach_right * mach_right - 1.0) * (mach_right * mach_right - 1.0);
-        p_minus = ((COMPUTE_REAL)0.25) * (mach_right - 1.0) * (mach_right - 1.0) * (((COMPUTE_REAL)2.0) + mach_right) - alpha * mach_right * (mach_right * mach_right - 1.0) * (mach_right * mach_right - 1.0);
+        mach_minus = -((COMPUTE_REAL)0.25) * (mach_right - ((COMPUTE_REAL)1.0)) * (mach_right - ((COMPUTE_REAL)1.0)) - beta * (mach_right * mach_right - ((COMPUTE_REAL)1.0)) * (mach_right * mach_right - ((COMPUTE_REAL)1.0));
+        p_minus = ((COMPUTE_REAL)0.25) * (mach_right - ((COMPUTE_REAL)1.0)) * (mach_right - ((COMPUTE_REAL)1.0)) * (((COMPUTE_REAL)2.0) + mach_right) - alpha * mach_right * (mach_right * mach_right - ((COMPUTE_REAL)1.0)) * (mach_right * mach_right - ((COMPUTE_REAL)1.0));
     }
     
     COMPUTE_REAL mach_number = mach_plus + mach_minus;
     COMPUTE_REAL p = p_plus * p_left + p_minus * p_right;
-    COMPUTE_REAL mass_flux = mach_number * sound_speed_max * (mach_number > 0.0 ? rho_left : rho_right);
+    COMPUTE_REAL mass_flux = mach_number * sound_speed_max * (mach_number > ((COMPUTE_REAL)0.0) ? rho_left : rho_right);
     
-    if (mach_number > 0.0) {
+    if (mach_number > ((COMPUTE_REAL)0.0)) {
         flux[0] = mass_flux;
         flux[1] = mass_flux * u_left + p * normal[0];
         flux[2] = mass_flux * v_left + p * normal[1];
@@ -227,21 +227,21 @@ __device__ inline void slau2_flux(const COMPUTE_REAL* state_left, const COMPUTE_
     
     // Pressure split: AUSM+ polynomials with alpha = 0
     COMPUTE_REAL beta_left, beta_right;
-    if (fabs(normal_mach_left) < 1.0) {
-        beta_left = ((COMPUTE_REAL)0.25) * (((COMPUTE_REAL)2.0) - normal_mach_left) * (normal_mach_left + 1.0) * (normal_mach_left + 1.0);
+    if (fabs(normal_mach_left) < ((COMPUTE_REAL)1.0)) {
+        beta_left = ((COMPUTE_REAL)0.25) * (((COMPUTE_REAL)2.0) - normal_mach_left) * (normal_mach_left + ((COMPUTE_REAL)1.0)) * (normal_mach_left + ((COMPUTE_REAL)1.0));
     } else {
-        beta_left = (normal_mach_left >= 0.0) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
+        beta_left = (normal_mach_left >= ((COMPUTE_REAL)0.0)) ? ((COMPUTE_REAL)1.0) : ((COMPUTE_REAL)0.0);
     }
-    if (fabs(normal_mach_right) < 1.0) {
-        beta_right = ((COMPUTE_REAL)0.25) * (((COMPUTE_REAL)2.0) + normal_mach_right) * (normal_mach_right - 1.0) * (normal_mach_right - 1.0);
+    if (fabs(normal_mach_right) < ((COMPUTE_REAL)1.0)) {
+        beta_right = ((COMPUTE_REAL)0.25) * (((COMPUTE_REAL)2.0) + normal_mach_right) * (normal_mach_right - ((COMPUTE_REAL)1.0)) * (normal_mach_right - ((COMPUTE_REAL)1.0));
     } else {
-        beta_right = (normal_mach_right >= 0.0) ? ((COMPUTE_REAL)0.0) : ((COMPUTE_REAL)1.0);
+        beta_right = (normal_mach_right >= ((COMPUTE_REAL)0.0)) ? ((COMPUTE_REAL)0.0) : ((COMPUTE_REAL)1.0);
     }
     
     COMPUTE_REAL p_face = ((COMPUTE_REAL)0.5) * (p_left + p_right) + ((COMPUTE_REAL)0.5) * (beta_left - beta_right) * (p_left - p_right);
     p_face += sqrt(((COMPUTE_REAL)0.5) * (speed_sq_left + speed_sq_right)) * (beta_left + beta_right - ((COMPUTE_REAL)1.0)) * sound_speed_face * ((COMPUTE_REAL)0.5) * (rho_left + rho_right);
     
-    if (mass_flux > 0.0) {
+    if (mass_flux > ((COMPUTE_REAL)0.0)) {
         flux[0] = mass_flux;
         flux[1] = mass_flux * u_left + p_face * normal[0];
         flux[2] = mass_flux * v_left + p_face * normal[1];
