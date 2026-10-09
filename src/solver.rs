@@ -148,6 +148,21 @@ pub fn run_solver_generic<
     let mut buffers = allocate_buffers::<U, RHS, COMP>(&stream, &mesh)?;
 
     let io_stream = ctx.new_stream()?;
+
+    // Reusable pinned staging buffers for every device→host save (IC, loop
+    // steps, final). Buffers are loaned to save tasks and returned via the
+    // channel when the HDF5 write finishes; the final task's buffer is sent
+    // to `final_tx` so the end-of-run state report can reuse it instead of
+    // allocating and copying the whole state again.
+    let (pool_tx, pool_rx) = std::sync::mpsc::channel::<cudarc::driver::PinnedHostSlice<U>>();
+    for _ in 0..3 {
+        let buf = unsafe { ctx.alloc_pinned_with_flags::<U>(mesh.state_size, 0) }?;
+        pool_tx
+            .send(buf)
+            .map_err(|_| "pinned buffer pool send failed")?;
+    }
+    let (final_tx, final_rx) = std::sync::mpsc::channel::<cudarc::driver::PinnedHostSlice<U>>();
+
     let mach_bulk = COMP::from_f64(config.physics.mach_bulk as f64);
     let cfgs = launch_configs(&mesh);
 
@@ -162,7 +177,7 @@ pub fn run_solver_generic<
     )?;
 
     // SAVE INITIAL CONDITION AS STEP 99999
-    let mut h_u = unsafe { ctx.alloc_pinned_with_flags::<U>(mesh.state_size, 0) }?;
+    let mut h_u = pool_rx.recv()?;
     stream.memcpy_dtoh(&buffers.u, &mut h_u)?;
     let out_dir = config.io.output_dir.clone();
     let prefix = config.io.prefix.clone();
@@ -176,6 +191,9 @@ pub fn run_solver_generic<
         &out_dir,
         &prefix,
     )?;
+    pool_tx
+        .send(h_u)
+        .map_err(|_| "pinned buffer pool send failed")?;
 
     let dt = COMP::from_f64(config.solver.dt as f64);
     let n_steps = config.solver.n_steps;
@@ -241,8 +259,14 @@ pub fn run_solver_generic<
         )?;
 
         if step.is_multiple_of(config.io.save_freq) || step == n_steps - 1 {
+            let buf = pool_rx.recv()?;
+            let done = if step == n_steps - 1 {
+                final_tx.clone()
+            } else {
+                pool_tx.clone()
+            };
             io_threads.push(spawn_io_task(
-                &ctx, &stream, &io_stream, &buffers.u, &mesh, step, &config,
+                &stream, &io_stream, &buffers.u, &mesh, step, &config, buf, done,
             )?);
         }
     }
@@ -269,12 +293,23 @@ pub fn run_solver_generic<
         elapsed.as_secs_f64() * 1000.0 / (n_steps as f64)
     );
 
-    let mut h_u_final = unsafe { ctx.alloc_pinned_with_flags::<U>(mesh.state_size, 0) }?;
-    stream.memcpy_dtoh(&buffers.u, &mut h_u_final)?;
+    // Reuse the final save's staging buffer (it already holds this state on
+    // host); fall back to a fresh copy only if no final save was made.
+    let h_u_final = match final_rx.try_recv() {
+        Ok(buf) => buf,
+        Err(_) => {
+            let mut buf = unsafe { ctx.alloc_pinned_with_flags::<U>(mesh.state_size, 0) }?;
+            stream.memcpy_dtoh(&buffers.u, &mut buf)?;
+            buf
+        }
+    };
     stream.synchronize()?;
 
     let slice = h_u_final.as_slice().expect("pinned host buffer");
     physical_state_report(slice, mesh.total_points);
+
+    // Release the pooled staging buffers (all save tasks have joined).
+    for _ in pool_rx.try_iter() {}
 
     Ok(())
 }
@@ -647,21 +682,20 @@ fn launch_rk_stage<U: PrecisionType, RHS: PrecisionType, COMP: PrecisionType>(
 // Asynchronous HDF5 output and final state report.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
-    ctx: &std::sync::Arc<cudarc::driver::CudaContext>,
     stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     io_stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     d_u: &cudarc::driver::CudaSlice<U>,
     mesh: &MeshDims<COMP>,
     step: usize,
     config: &crate::config::OpenDynamoConfig,
+    mut buf: cudarc::driver::PinnedHostSlice<U>,
+    done: std::sync::mpsc::Sender<cudarc::driver::PinnedHostSlice<U>>,
 ) -> Result<std::thread::JoinHandle<()>, Box<dyn std::error::Error>> {
     let event = stream.record_event(None)?;
     io_stream.wait(&event)?;
-
-    // Allocate pinned memory and copy asynchronously
-    let mut h_u = unsafe { ctx.alloc_pinned_with_flags::<U>(mesh.state_size, 0) }?;
-    io_stream.memcpy_dtoh(d_u, &mut h_u)?;
+    io_stream.memcpy_dtoh(d_u, &mut buf)?;
 
     let out_dir = config.io.output_dir.clone();
     let prefix = config.io.prefix.clone();
@@ -669,15 +703,18 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
     let io_stream_clone = io_stream.clone();
 
     Ok(std::thread::spawn(move || {
-        // Block this background thread until the async copy finishes
-        if let Err(e) = io_stream_clone.synchronize() {
-            eprintln!("IO stream sync failed: {e}");
-            return;
+        // Block this background thread until the async copy finishes, then
+        // write the HDF5 file and hand the staging buffer back to its pool.
+        let result: Result<(), Box<dyn std::error::Error>> = (|| {
+            io_stream_clone.synchronize()?;
+            let slice = buf.as_slice()?;
+            crate::io::save_hdf5_xdmf(step, slice, nx, ny, nz, &out_dir, &prefix)?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            eprintln!("IO task failed: {e}");
         }
-        let slice = h_u.as_slice().expect("pinned host buffer");
-        if let Err(e) = crate::io::save_hdf5_xdmf(step, slice, nx, ny, nz, &out_dir, &prefix) {
-            eprintln!("Failed to save HDF5: {e}");
-        }
+        let _ = done.send(buf);
     }))
 }
 
