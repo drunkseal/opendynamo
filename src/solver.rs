@@ -319,12 +319,21 @@ pub fn run_solver_generic<
 // ---------------------------------------------------------------------------
 
 fn nvrtc_options<U: PrecisionType, Q: PrecisionType, RHS: PrecisionType, COMP: PrecisionType>(
+    ctx: &std::sync::Arc<cudarc::driver::CudaContext>,
     config: &crate::config::OpenDynamoConfig,
 ) -> cudarc::nvrtc::CompileOptions {
     let mut opts = cudarc::nvrtc::CompileOptions::default();
     if config.solver.fast_math {
         opts.options.push("--use_fast_math".to_string());
     }
+    // Target the actual device arch instead of NVRTC's default (compute_52).
+    // Arch-specific PTX lets the JIT apply sm_XX scheduling (PyFR reports
+    // runtime codegen targeting the current GPU as a major win).
+    let (major, minor) = ctx
+        .compute_capability()
+        .expect("failed to query compute capability");
+    let arch: &'static str = Box::leak(format!("compute_{major}{minor}").into_boxed_str());
+    opts.arch = Some(arch);
     opts.options.push(format!("-DU_REAL={}", U::c_type()));
     opts.options.push(format!("-DQ_REAL={}", Q::c_type()));
     opts.options.push(format!("-DRHS_REAL={}", RHS::c_type()));
@@ -372,7 +381,7 @@ fn compile_module<U: PrecisionType, Q: PrecisionType, RHS: PrecisionType, COMP: 
     ctx: &std::sync::Arc<cudarc::driver::CudaContext>,
     config: &crate::config::OpenDynamoConfig,
 ) -> Result<std::sync::Arc<cudarc::driver::CudaModule>, Box<dyn std::error::Error>> {
-    let opts = nvrtc_options::<U, Q, RHS, COMP>(config);
+    let opts = nvrtc_options::<U, Q, RHS, COMP>(ctx, config);
     let ptx_source = format!(
         "{}\n{}\n{}\n{}\n{}",
         include_str!("cuda/constants.cuh"),
@@ -477,7 +486,8 @@ fn launch_configs<COMP>(mesh: &MeshDims<COMP>) -> LaunchConfigs {
             block_dim,
             shared_mem_bytes: 0,
         },
-        add: cudarc::driver::LaunchConfig::for_num_elems(mesh.state_size as u32),
+        // RK kernels process 4 points per thread (vectorized loads).
+        add: cudarc::driver::LaunchConfig::for_num_elems((mesh.state_size / 4) as u32),
         face_x: cudarc::driver::LaunchConfig {
             grid_dim: (mesh.num_elements.div_ceil(FACES_PER_BLOCK) as u32, 1, 1),
             block_dim,

@@ -219,23 +219,48 @@ __device__ __forceinline__ void read_gradient_slice(const COMPUTE_REAL* src_left
 // ---------------------------------------------------------------------------
 // Volume integral.
 //
-// One direction: evaluate the fluxes, stage them in s_buf (the two barriers
-// keep every thread's writes ahead of the next read), differentiate along the
-// direction and accumulate into rhs_sum. `row` is the c_d_matrix row;
-// the shared gather for sample m is index base + m*stride.
+// x/y directions differentiate via warp shuffles: within a warp the 4 samples
+// along xi/eta live in the point-owning lane bits, so each thread keeps its
+// flux in registers and fetches the 3 missing neighbours with shfl_xor (same
+// pattern as derivative_shfl above). No shared staging, no barriers.
+// Only zeta crosses warps and still stages through s_buf.
+// Accumulation order matches the staged path exactly (bit-identical).
 // ---------------------------------------------------------------------------
-template <typename DIR>
-__device__ __forceinline__ void accumulate_volume_rhs(
-    COMPUTE_REAL (*s_buf)[NPTS_ELEM], const COMPUTE_REAL* state, const COMPUTE_REAL* grad,
-    int row, int base, int stride, int pt, COMPUTE_REAL jac, COMPUTE_REAL* rhs_sum) {
+template <typename DIR, int S1, int S2, int S3>
+__device__ __forceinline__ void accumulate_volume_rhs_shfl(
+    const COMPUTE_REAL* state, const COMPUTE_REAL* grad,
+    int idx, COMPUTE_REAL jac, COMPUTE_REAL* rhs_sum) {
     COMPUTE_REAL flux_euler[5], flux_viscous[5];
     compute_volume_fluxes(DIR{}, state, grad, flux_euler, flux_viscous);
+    const unsigned mask = 0xffffffffu;
+    for (int v = 0; v < 5; ++v) {
+        COMPUTE_REAL f = flux_euler[v] - flux_viscous[v];
+        COMPUTE_REAL f_1 = __shfl_xor_sync(mask, f, S1);
+        COMPUTE_REAL f_2 = __shfl_xor_sync(mask, f, S2);
+        COMPUTE_REAL f_3 = __shfl_xor_sync(mask, f, S3);
+        COMPUTE_REAL d_flux = 0;
+        for (int m = 0; m < NPTS1D; ++m) {
+            COMPUTE_REAL f_m = (idx == m) ? f : (idx == (m ^ 1)) ? f_1 : (idx == (m ^ 2)) ? f_2 : f_3;
+            d_flux += c_d_matrix[idx * NPTS1D + m] * f_m;
+        }
+        rhs_sum[v] += d_flux * jac;
+    }
+}
+
+// z-direction: the 4 samples along zeta have stride NPTS1D2 (cross warps), so
+// the fluxes are staged through s_buf. s_buf is only written here now; the
+// single barrier separates the writes from every thread's column reads.
+__device__ __forceinline__ void accumulate_volume_rhs_z(
+    COMPUTE_REAL (*s_buf)[NPTS_ELEM], const COMPUTE_REAL* state, const COMPUTE_REAL* grad,
+    int row, int base, int pt, COMPUTE_REAL jac, COMPUTE_REAL* rhs_sum) {
+    COMPUTE_REAL flux_euler[5], flux_viscous[5];
+    compute_volume_fluxes(flux_dir_z{}, state, grad, flux_euler, flux_viscous);
     __syncthreads();
     for (int v = 0; v < 5; ++v) s_buf[v][pt] = flux_euler[v] - flux_viscous[v];
     __syncthreads();
     for (int v = 0; v < 5; ++v) {
         COMPUTE_REAL d_flux = 0;
-        for (int m = 0; m < NPTS1D; ++m) d_flux += c_d_matrix[row * NPTS1D + m] * s_buf[v][base + m * stride];
+        for (int m = 0; m < NPTS1D; ++m) d_flux += c_d_matrix[row * NPTS1D + m] * s_buf[v][base + m * NPTS1D2];
         rhs_sum[v] += d_flux * jac;
     }
 }
@@ -426,16 +451,14 @@ extern "C" __global__ void compute_rhs_volume_kernel(const U_REAL* U, RHS_REAL* 
     COMPUTE_REAL grad_local[15];
     for (int v = 0; v < 15; ++v) grad_local[v] = s_grad[v][pt];
 
-    // X-Flux
-    accumulate_volume_rhs<flux_dir_x>(s_buf, state_local, grad_local, i, j * NPTS1D + k * NPTS1D2, 1, pt, jac_x, rhs_sum);
+    // X-Flux (shuffle derivative, no shared staging)
+    accumulate_volume_rhs_shfl<flux_dir_x, 1, 2, 3>(state_local, grad_local, i, jac_x, rhs_sum);
 
-    // Y-Flux (leading barrier separates Y's stage write from X's derivative reads)
-    __syncthreads();
-    accumulate_volume_rhs<flux_dir_y>(s_buf, state_local, grad_local, j, i + k * NPTS1D2, NPTS1D, pt, jac_y, rhs_sum);
+    // Y-Flux (shuffle derivative, no shared staging)
+    accumulate_volume_rhs_shfl<flux_dir_y, 4, 8, 12>(state_local, grad_local, j, jac_y, rhs_sum);
 
-    // Z-Flux (ditto for Z)
-    __syncthreads();
-    accumulate_volume_rhs<flux_dir_z>(s_buf, state_local, grad_local, k, i + j * NPTS1D, NPTS1D2, pt, jac_z, rhs_sum);
+    // Z-Flux (crosses warps: staged through s_buf)
+    accumulate_volume_rhs_z(s_buf, state_local, grad_local, k, i + j * NPTS1D, pt, jac_z, rhs_sum);
 
     // Face corrections from the j arrays are applied in the RK kernels.
     for (int v = 0; v < 5; ++v) {
