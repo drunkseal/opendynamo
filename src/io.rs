@@ -4,34 +4,25 @@ use std::path::Path;
 use hdf5_metno as hdf5;
 
 use crate::constants::{FR_ORDER, N_VARS, PTS_PER_ELEM};
-use crate::solver::PrecisionType;
 
-// State element -> f32 dump storage (follows the solver's PrecisionType).
-impl<T: PrecisionType> ToF32Val for T {
-    fn to_f32_val(self) -> f32 {
-        self.to_f32()
-    }
-}
-
-pub trait ToF32Val: Copy {
-    fn to_f32_val(self) -> f32;
-}
-
+// 1D chunk for chunked+shuffled+deflated datasets: 262144 elements (1 MB
+// per chunk in f32). Chunking only exists to enable the filter pipeline;
+// readers always fetch whole planes here, so chunk boundaries don't matter.
 // Conservative-variable plane order of the state buffer (var-major layout):
-// rho, rho*u, rho*v, rho*w, rho*e_total. Stored under the conserved names;
-// derived velocity magnitude `vel` and pressure `p` are added for visuals.
+// rho, rho*u, rho*v, rho*w, rho*e_total.
 const VAR_NAMES: [&str; N_VARS] = ["rho", "rhou", "rhov", "rhow", "E"];
 
-/// Save one dump: per-variable HDF5 datasets on the full solution-point grid
-/// (tensor-ordered, x fastest) plus an XDMF wrapping them into a structured
-/// mesh ParaView can ingest directly. Also adds host-computed velocity
-/// magnitude and pressure (ideal gas, gamma = 1.4) fields.
-///
-/// `u_data` is the var-major device state: N_VARS contiguous planes of
-/// `total_points` values, each plane indexed `elem * PTS_PER_ELEM + pt` with
-/// `pt = i + P1*j + P1^2*k` (element-major blocks).
-pub fn save_hdf5_xdmf<T: hdf5::H5Type + ToF32Val>(
-    step: usize,
+/// Solver-native dump/checkpoint: N_VARS raw planes exactly as the device
+/// state buffer holds them (element-major point blocks, `pt = i + P1*j +
+/// P1^2*k`), written as 1D datasets with grid metadata as attrs. Note: this
+/// is NOT directly ParaView-renderable; run `scripts/h5_to_xdmf.py` on the
+/// files for visualization.
+pub fn save_state_h5<T: hdf5::H5Type>(
+    step_label: usize,
+    t: f64,
+    u_real_kind: &str,
+    out_dir: &str,
+    base_prefix: &str,
     u_data: &[T],
     nx: usize,
     ny: usize,
@@ -39,20 +30,12 @@ pub fn save_hdf5_xdmf<T: hdf5::H5Type + ToF32Val>(
     lx: f64,
     ly: f64,
     lz: f64,
-    out_dir: &str,
-    prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(out_dir)?;
 
-    let h5_filename = format!("{}_{:05}.h5", prefix, step);
-    let h5_path = Path::new(out_dir).join(&h5_filename);
-    let xdmf_path = Path::new(out_dir).join(format!("{}_{:05}.xmf", prefix, step));
+    let h5_path = Path::new(out_dir).join(format!("{}_{}_{:06}.h5", base_prefix, u_real_kind, step_label));
 
-    let p1 = FR_ORDER + 1;
-    let total_elements = nx * ny * nz;
-    let total_points = total_elements * PTS_PER_ELEM;
-    let (npx, npy, npz) = (nx * p1, ny * p1, nz * p1);
-
+    let total_points = nx * ny * nz * PTS_PER_ELEM;
     if u_data.len() != N_VARS * total_points {
         return Err(format!(
             "state length {} != {} vars x {} points",
@@ -63,121 +46,124 @@ pub fn save_hdf5_xdmf<T: hdf5::H5Type + ToF32Val>(
         .into());
     }
 
-    // Host copy per variable, reordered from element-major blocks to the
-    // global point tensor (x fastest, z slowest) so the datasets are plain
-    // structured grids.
-    let mut vars: Vec<Vec<f32>> = Vec::with_capacity(N_VARS);
-    for v in 0..N_VARS {
-        let plane = &u_data[v * total_points..(v + 1) * total_points];
-        let mut out = vec![0.0f32; total_points];
-        for ez in 0..nz {
-            for ey in 0..ny {
-                for ex in 0..nx {
-                    let elem = ex + nx * (ey + ny * ez);
-                    let src_base = elem * PTS_PER_ELEM;
-                    let dst_base = (ez * p1) * (npx * npy) + (ey * p1) * npx + ex * p1;
-                    for k in 0..p1 {
-                        for j in 0..p1 {
-                            for i in 0..p1 {
-                                let dst = dst_base + k * (npx * npy) + j * npx + i;
-                                out[dst] = plane[src_base + k * p1 * p1 + j * p1 + i].to_f32_val();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        vars.push(out);
-    }
-
-    // Derived fields for direct visualization: velocity magnitude and
-    // pressure (ideal gas, same conventions as the device kernels).
-    let mut names: Vec<&str> = VAR_NAMES.to_vec();
-    {
-        let (rho, rhou, rhov, rhow, e) = (&vars[0], &vars[1], &vars[2], &vars[3], &vars[4]);
-        let mut vel = vec![0.0f32; total_points];
-        let mut p = vec![0.0f32; total_points];
-        for n in 0..total_points {
-            let u = rhou[n] / rho[n];
-            let v = rhov[n] / rho[n];
-            let w = rhow[n] / rho[n];
-            vel[n] = (u * u + v * v + w * w).sqrt();
-            p[n] = f32::max(
-                1.0e-7,
-                0.4 * (e[n] - 0.5 * (rhou[n] * u + rhov[n] * v + rhow[n] * w)),
-            );
-        }
-        vars.push(vel);
-        vars.push(p);
-        names.push("vel");
-        names.push("p");
-    }
-
-    // Create HDF5 file and write data
     let file = hdf5::File::create(&h5_path)?;
     let group = file.create_group("data")?;
-    for (name, arr) in names.iter().zip(vars.iter()) {
+    for (v, name) in VAR_NAMES.iter().enumerate() {
         let dataset = group
-            .new_dataset::<f32>()
-            .shape((npz, npy, npx))
+            .new_dataset::<T>()
+            .shape(total_points)
             .create(*name)?;
-        dataset.write_raw(arr.as_slice())?;
+        dataset.write_raw(&u_data[v * total_points..(v + 1) * total_points])?;
     }
-
-    // Rectilinear axis coordinates for the XDMF geometry (VXVYVZ: explicit
-    // and unambiguous). Solution points sit at half-cell-ish spacing dx = L/N.
-    let x_axis: Vec<f64> = (0..=npx).map(|i| i as f64 * (lx / npx as f64)).collect();
-    let y_axis: Vec<f64> = (0..=npy).map(|i| i as f64 * (ly / npy as f64)).collect();
-    let z_axis: Vec<f64> = (0..=npz).map(|i| i as f64 * (lz / npz as f64)).collect();
-    for (name, axis) in [("xc", &x_axis), ("yc", &y_axis), ("zc", &z_axis)] {
-        let dataset = group.new_dataset::<f64>().shape(axis.len()).create(name)?;
-        dataset.write_raw(axis.as_slice())?;
-    }
-
-    let precision = 4u32; // f32
-
-    // Write XDMF file pointing to the HDF5 datasets. ParaView expects node
-    // counts for the rectilinear topology (cells = nodes - 1 on every axis).
-    let mut attributes = String::new();
-    for name in &names {
-        attributes.push_str(&format!(
-            r#"      <Attribute Name="{name}" AttributeType="Scalar" Center="Cell">
-        <DataItem Dimensions="{npz} {npy} {npx}" NumberType="Float" Precision="{precision}" Format="HDF">
-          {h5_filename}:/data/{name}
-        </DataItem>
-      </Attribute>
-"#
-        ));
-    }
-
-    let xdmf_content = format!(
-        r#"<?xml version="1.0" ?>
-<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
-<Xdmf Version="2.0">
-  <Domain>
-    <Grid Name="FR_Grid" GridType="Uniform">
-      <Topology TopologyType="3DRectMesh" Dimensions="{tpz} {tpy} {tpx}"/>
-      <Geometry GeometryType="VXVYVZ">
-        <DataItem Dimensions="{tpx}" NumberType="Float" Precision="8" Format="HDF">
-          {h5_filename}:/data/xc
-        </DataItem>
-        <DataItem Dimensions="{tpy}" NumberType="Float" Precision="8" Format="HDF">
-          {h5_filename}:/data/yc
-        </DataItem>
-        <DataItem Dimensions="{tpz}" NumberType="Float" Precision="8" Format="HDF">
-          {h5_filename}:/data/zc
-        </DataItem>
-      </Geometry>
-{attributes}    </Grid>
-  </Domain>
-</Xdmf>
-"#,
-        tpz = npz + 1,
-        tpy = npy + 1,
-        tpx = npx + 1,
-        attributes = attributes,
-    );
-
-    fs::write(xdmf_path, xdmf_content)?;
+    file.new_attr::<u64>().create("nx")?.write_scalar(&(nx as u64))?;
+    file.new_attr::<u64>().create("ny")?.write_scalar(&(ny as u64))?;
+    file.new_attr::<u64>().create("nz")?.write_scalar(&(nz as u64))?;
+    file.new_attr::<u64>().create("fr_order")?.write_scalar(&(FR_ORDER as u64))?;
+    file.new_attr::<u64>().create("step")?.write_scalar(&(step_label as u64))?;
+    file.new_attr::<f64>().create("t")?.write_scalar(&t)?;
+    file.new_attr::<f64>().create("lx")?.write_scalar(&lx)?;
+    file.new_attr::<f64>().create("ly")?.write_scalar(&ly)?;
+    file.new_attr::<f64>().create("lz")?.write_scalar(&lz)?;
+    file.new_attr::<hdf5::types::FixedAscii<3>>()
+        .create("u_real")?
+        .write_scalar(&hdf5::types::FixedAscii::<3>::from_ascii(u_real_kind.as_bytes())?)?;
     Ok(())
+}
+
+/// A state loaded from a checkpoint file.
+pub struct LoadedState {
+    /// N_VARS planes of `total_points` f32 values (device layout). The
+    /// planes always carry the validated dims of this run (`nx..nz` above).
+    pub planes: Vec<Vec<f32>>,
+    /// Validated grid dims (equal to the checkpoint's, after the load check).
+    #[allow(dead_code)]
+    pub nx: usize,
+    #[allow(dead_code)]
+    pub ny: usize,
+    #[allow(dead_code)]
+    pub nz: usize,
+    /// Step label the state was saved at (continue numbering from here).
+    pub step: usize,
+    /// Physical time at which the state was saved.
+    pub t: f64,
+    /// Precision tag of the dump ("f32"/"f64"), validated by the caller.
+    #[allow(dead_code)]
+    pub u_real: String,
+}
+
+/// Validate and load a checkpoint written by [`save_state_h5`]. The expected
+/// mesh and precision kind must match the current run exactly; var values are
+/// converted to f32 host planes (exact when the file is f32, rounding when it
+/// is f64 and the current pipeline is f32 — configs should normally match).
+pub fn load_state_h5(
+    path: &str,
+    expect_nx: usize,
+    expect_ny: usize,
+    expect_nz: usize,
+    expect_kind: &str,
+) -> Result<LoadedState, Box<dyn std::error::Error>> {
+    if !Path::new(path).exists() {
+        return Err(format!("initial_state file not found: {path}").into());
+    }
+    let file = hdf5::File::open(path)?;
+    let nx = file.attr("nx")?.read_scalar::<u64>()? as usize;
+    let ny = file.attr("ny")?.read_scalar::<u64>()? as usize;
+    let nz = file.attr("nz")?.read_scalar::<u64>()? as usize;
+    let fr = file.attr("fr_order")?.read_scalar::<u64>()? as usize;
+    let step = file.attr("step")?.read_scalar::<u64>()? as usize;
+    let t = file.attr("t")?.read_scalar::<f64>()?;
+    let kind_bytes = file
+        .attr("u_real")?
+        .read_scalar::<hdf5::types::FixedAscii<3>>()?;
+    let kind = std::str::from_utf8(kind_bytes.as_bytes())
+        .map_err(|_| "bad u_real attr")?
+        .to_string();
+
+    if nx != expect_nx || ny != expect_ny || nz != expect_nz {
+        return Err(format!(
+            "initial_state mesh {nx}x{ny}x{nz} does not match config {expect_nx}x{expect_ny}x{expect_nz}; refusing to load"
+        )
+        .into());
+    }
+    if fr != FR_ORDER {
+        return Err(format!(
+            "initial_state fr_order {fr} != configured FR_ORDER {FR_ORDER}"
+        )
+        .into());
+    }
+    if kind != expect_kind {
+        return Err(format!(
+            "initial_state u_real '{kind}' does not match the configured pipeline ('{expect_kind}'); refusing to load"
+        )
+        .into());
+    }
+
+    let group = file.group("data")?;
+    let mut planes = Vec::with_capacity(N_VARS);
+    for name in VAR_NAMES.iter() {
+        let dataset = group
+            .dataset(name)
+            .map_err(|_| format!("initial_state missing dataset /data/{name}"))?;
+        let len: usize = dataset.shape().iter().sum();
+        let expected = expect_nx * expect_ny * expect_nz * PTS_PER_ELEM;
+        if len != expected {
+            return Err(format!(
+                "initial_state /data/{name} has {} values, expected {expected}",
+                len
+            )
+            .into());
+        }
+        let plane: Vec<f32> = dataset.read_raw()?;
+        planes.push(plane);
+    }
+
+    Ok(LoadedState {
+        planes,
+        nx,
+        ny,
+        nz,
+        step,
+        t,
+        u_real: kind,
+    })
 }

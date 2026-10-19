@@ -45,6 +45,16 @@ impl PrecisionType for f64 {
     }
 }
 
+// Precision tag for dump/checkpoint attrs ("f32"/"f64"), independent of the
+// NVRTC c_type names.
+fn precision_tag<U>() -> &'static str {
+    if std::mem::size_of::<U>() == 4 {
+        "f32"
+    } else {
+        "f64"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Plain data structs (no methods): everything the setup and launch helpers
 // exchange.
@@ -170,32 +180,65 @@ pub fn run_solver_generic<
     let wall_y = config.physics.y_boundary == crate::config::YBoundary::Wall;
     let cfgs = launch_configs(&mesh, wall_y);
 
-    println!("Initializing flow...");
-    launch_init_flow(
-        &stream,
-        &kernels.init_flow,
-        cfgs.volume,
-        &mut buffers.u,
-        &mesh,
-        mach_bulk,
-    )?;
+    // Resume from a checkpoint when configured; otherwise initialize the
+    // analytic initial condition (plus the optional trip). Resume is exact:
+    // for the explicit RK scheme u fully defines the state at a step
+    // boundary, and the checkpoint carries its own trip perturbation.
+    use crate::io::LoadedState;
+    let resume = match config.physics.initial_state.as_deref() {
+        Some(path) => {
+            println!("Resuming from {path} ...");
+            let st: LoadedState = crate::io::load_state_h5(
+                path,
+                mesh.nx,
+                mesh.ny,
+                mesh.nz,
+                precision_tag::<U>(),
+            )?;
+            // Host planes (exact for f32 pipelines; f64 configs convert via
+            // f32 values as stored in the checkpoint).
+            let mut host = Vec::with_capacity(mesh.state_size);
+            for plane in &st.planes {
+                host.extend(plane.iter().map(|x| U::from_f64(*x as f64)));
+            }
+            stream.memcpy_htod(&host, &mut buffers.u)?;
+            println!(
+                "Resumed at step {} (t = {:.6}), skipping init and trip kernels.",
+                st.step, st.t
+            );
+            Some((st.step, st.t))
+        }
+        None => {
+            println!("Initializing flow...");
+            launch_init_flow(
+                &stream,
+                &kernels.init_flow,
+                cfgs.volume,
+                &mut buffers.u,
+                &mesh,
+                mach_bulk,
+            )?;
 
-    let perturb_amp = config.physics.perturbation_amplitude;
-    if perturb_amp != 0.0 {
-        let n_modes = config.physics.perturbation_modes.max(1) as i32;
-        let seed = COMP::from_f64(config.physics.perturbation_seed as f64);
-        println!("Tripping with {} divergence-free modes, amplitude {}...", n_modes, perturb_amp);
-        launch_perturb_flow(
-            &stream,
-            &kernels.perturb_flow,
-            cfgs.volume,
-            &mut buffers.u,
-            &mesh,
-            COMP::from_f64(perturb_amp as f64),
-            n_modes,
-            seed,
-        )?;
-    }
+            let perturb_amp = config.physics.perturbation_amplitude;
+            if perturb_amp != 0.0 {
+                let n_modes = config.physics.perturbation_modes.max(1) as i32;
+                let seed = COMP::from_f64(config.physics.perturbation_seed as f64);
+                println!("Tripping with {} divergence-free modes, amplitude {}...", n_modes, perturb_amp);
+                launch_perturb_flow(
+                    &stream,
+                    &kernels.perturb_flow,
+                    cfgs.volume,
+                    &mut buffers.u,
+                    &mesh,
+                    COMP::from_f64(perturb_amp as f64),
+                    n_modes,
+                    seed,
+                )?;
+            }
+            None
+        }
+    };
+    let base_t = resume.as_ref().map(|r| r.1).unwrap_or(0.0);
 
     // SAVE INITIAL CONDITION AS STEP 99999
     let mut h_u = pool_rx.recv()?;
@@ -203,8 +246,12 @@ pub fn run_solver_generic<
     let out_dir = config.io.output_dir.clone();
     let prefix = config.io.prefix.clone();
     let slice = h_u.as_slice().expect("pinned host buffer");
-    crate::io::save_hdf5_xdmf(
+    crate::io::save_state_h5(
         INIT_OUTPUT_STEP,
+        base_t,
+        precision_tag::<U>(),
+        &out_dir,
+        &prefix,
         slice,
         mesh.nx,
         mesh.ny,
@@ -212,8 +259,6 @@ pub fn run_solver_generic<
         mesh.lx.to_f32() as f64,
         mesh.ly.to_f32() as f64,
         mesh.lz.to_f32() as f64,
-        &out_dir,
-        &prefix,
     )?;
     pool_tx
         .send(h_u)
@@ -290,7 +335,7 @@ pub fn run_solver_generic<
                 pool_tx.clone()
             };
             io_threads.push(spawn_io_task(
-                &stream, &io_stream, &buffers.u, &mesh, step, &config, buf, done,
+                &stream, &io_stream, &buffers.u, &mesh, step, resume, &config, buf, done,
             )?);
         }
     }
@@ -778,6 +823,7 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
     d_u: &cudarc::driver::CudaSlice<U>,
     mesh: &MeshDims<COMP>,
     step: usize,
+    resume: Option<(usize, f64)>,
     config: &crate::config::OpenDynamoConfig,
     mut buf: cudarc::driver::PinnedHostSlice<U>,
     done: std::sync::mpsc::Sender<cudarc::driver::PinnedHostSlice<U>>,
@@ -794,6 +840,17 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
         mesh.ly.to_f32() as f64,
         mesh.lz.to_f32() as f64,
     );
+    // Continuous step labels across resumes: a fresh run labels its first
+    // dump 0 (state after 1 step), so a run resumed from label S continues
+    // with S+1, S+2, ... aligning with an uninterrupted run's numbering.
+    let (base_step, base_t) = match resume {
+        Some((s, t)) => (Some(s), t),
+        None => (None, 0.0),
+    };
+    let n_steps = config.solver.n_steps;
+    let config_dt = config.solver.dt;
+    let checkpoint_freq = config.io.checkpoint_freq;
+    let kind = precision_tag::<U>();
     let io_stream_clone = io_stream.clone();
 
     Ok(std::thread::spawn(move || {
@@ -802,7 +859,32 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
         let result: Result<(), Box<dyn std::error::Error>> = (|| {
             io_stream_clone.synchronize()?;
             let slice = buf.as_slice()?;
-            crate::io::save_hdf5_xdmf(step, slice, nx, ny, nz, lx, ly, lz, &out_dir, &prefix)?;
+            let label = match base_step {
+                Some(s) => s + step + 1,
+                None => step,
+            };
+            let t = base_t + (step as f64 + 1.0) * (config_dt as f64);
+            crate::io::save_state_h5(label, t, kind, &out_dir, &prefix, slice, nx, ny, nz, lx, ly, lz)?;
+            // Checkpoint on the save cadence, and always at the final step
+            // so every run ends with a resumable state.
+            let want_checkpoint = step == n_steps - 1
+                || (checkpoint_freq > 0 && step.is_multiple_of(checkpoint_freq));
+            if want_checkpoint {
+                crate::io::save_state_h5(
+                    label,
+                    t,
+                    kind,
+                    &out_dir,
+                    "checkpoint",
+                    slice,
+                    nx,
+                    ny,
+                    nz,
+                    lx,
+                    ly,
+                    lz,
+                )?;
+            }
             Ok(())
         })();
         if let Err(e) = result {

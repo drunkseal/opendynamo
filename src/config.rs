@@ -125,6 +125,12 @@ pub struct PhysicsConfig {
     /// Hash seed for the mode mix (same seed + same binary => same trip).
     #[serde(default = "default_perturbation_seed")]
     pub perturbation_seed: u32,
+    /// Resume from a solver-native checkpoint file ([io] prefix format)
+    /// instead of the analytic init kernel. When set, takes precedence over
+    /// `initial_condition` and skips the trip kernel (the checkpoint state
+    /// already carries any perturbation baked in).
+    #[serde(default)]
+    pub initial_state: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -165,6 +171,12 @@ pub struct IOConfig {
     pub save_freq: usize,
     pub output_dir: String,
     pub prefix: String,
+    /// Write a resume checkpoint every N steps (solver-native raw state).
+    /// 0 = no intermediate checkpoints, but the final step is always
+    /// checkpointed. Checkpoints reuse the same async copy as the dumps, so
+    /// the marginal cost is one raw-file write.
+    #[serde(default)]
+    pub checkpoint_freq: usize,
 }
 
 pub fn load_config(path: &str) -> Result<OpenDynamoConfig, Box<dyn std::error::Error>> {
