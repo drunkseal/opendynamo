@@ -2,7 +2,7 @@ use cudarc::driver::PushKernelArg;
 
 use crate::config::{FluxScheme, InitialCondition, ViscosityModel, YBoundary};
 use crate::constants::{
-    FACES_PER_BLOCK, FR_ORDER, INIT_OUTPUT_STEP, N_VARS, PTS_PER_ELEM, PTS_PER_FACE,
+    FACES_PER_BLOCK, FR_ORDER, N_VARS, PTS_PER_ELEM, PTS_PER_FACE,
 };
 
 pub trait PrecisionType:
@@ -239,6 +239,9 @@ pub fn run_solver_generic<
         }
     };
     let base_t = resume.as_ref().map(|r| r.1).unwrap_or(0.0);
+    // Labels count completed RK3 steps: fresh start = 0, resumed start = the
+    // checkpoint's own label (= steps completed at the time it was saved).
+    let base_step_count = resume.as_ref().map(|r| r.0).unwrap_or(0);
     let compression = crate::io::parse_compression(&config.io.compression)?;
     if matches!(
         compression,
@@ -255,8 +258,11 @@ pub fn run_solver_generic<
     let out_dir = config.io.output_dir.clone();
     let prefix = config.io.prefix.clone();
     let slice = h_u.as_slice().expect("pinned host buffer");
+    // Label semantics (see spawn_io_task): labels count completed RK3 steps,
+    // so the startup state (fresh IC or the resumed checkpoint itself) is
+    // label = completed-so-far (0 fresh / S resumed), at t = base_t.
     crate::io::save_state_h5(
-        INIT_OUTPUT_STEP,
+        base_step_count,
         base_t,
         precision_tag::<U>(),
         &out_dir,
@@ -852,9 +858,11 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
         mesh.ly.to_f32() as f64,
         mesh.lz.to_f32() as f64,
     );
-    // Continuous step labels across resumes: a fresh run labels its first
-    // dump 0 (state after 1 step), so a run resumed from label S continues
-    // with S+1, S+2, ... aligning with an uninterrupted run's numbering.
+    // Label semantics: labels count completed RK3 steps, so each dump at the
+    // end of loop step `k` is label base + k + 1 (base 0 fresh, or the
+    // resumed startup's own label). Physical time: t = base_t + (k+1)·dt.
+    // Fresh runs therefore produce 000000 (IC, t = base_t), 000001 ... 00n;
+    // resumed runs continue seamlessly from the checkpoint label.
     let (base_step, base_t) = match resume {
         Some((s, t)) => (Some(s), t),
         None => (None, 0.0),
@@ -871,10 +879,7 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
         let result: Result<(), Box<dyn std::error::Error>> = (|| {
             io_stream_clone.synchronize()?;
             let slice = buf.as_slice()?;
-            let label = match base_step {
-                Some(s) => s + step + 1,
-                None => step,
-            };
+            let label = base_step.map_or(step + 1, |s| s + step + 1);
             let t = base_t + (step as f64 + 1.0) * (config_dt as f64);
             crate::io::save_state_h5(label, t, kind, &out_dir, &prefix, slice, nx, ny, nz, lx, ly, lz, compression)?;
             // Checkpoint on the save cadence, and always at the final step

@@ -12,5 +12,3 @@ pub const PTS_PER_FACE: usize = (FR_ORDER + 1) * (FR_ORDER + 1);
 pub const N_VARS: usize = 5;
 /// Faces grouped per thread block for in-block cache reuse.
 pub const FACES_PER_BLOCK: usize = PTS_PER_ELEM / PTS_PER_FACE;
-/// Step label used for the initial-condition output file.
-pub const INIT_OUTPUT_STEP: usize = 99999;
