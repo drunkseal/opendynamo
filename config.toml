@@ -1,27 +1,116 @@
+# ============================================================
+# OpenDynamo configuration.
+# The binary always loads ./config.toml (the working directory's copy).
+# Every key below is explicit with its available options documented;
+# omitting a key is always legal (see the "default:" notes).
+# ============================================================
+
 [mesh]
+# Element counts along each axis. Uniform, cuboid mesh of nx*ny*nz hexes;
+# each element carries (FR_ORDER+1)^3 = 64 solution points
+# (FR_ORDER = 3 is fixed in src/constants.rs).
 nx = 64
 ny = 64
 nz = 64
-# lx = 12.566370614359172   # domain size in x (default 4*pi)
-# ly = 2.0                  # domain size in y (default 2)
-# lz = 4.188790204786391    # domain size in z (default 4*pi/3)
+# domain size in x [default: 4*pi]
+# lx = 12.566370614359172
+# domain size in y [default: 2.0]; walls sit at y = ± ly/2 in wall mode
+# ly = 2.0
+# domain size in z [default: 4*pi/3]
+# lz = 4.188790204786391
 
 [physics]
+# Bulk Mach number of the base flow (u = 1.5*mach_bulk at the channel
+# centerline for the parabolic profile).
 mach_bulk = 0.3
-# initial_condition = "channel"  # channel | uniform
-# y_boundary = "wall"            # wall | periodic
+# Initial condition of a FRESH run (ignored when [physics].initial_state
+# is set): "channel" = parabolic Poiseuille profile
+#   u = 1.5*mach_bulk*(1 - (y/(ly/2))^2),
+# "uniform" = freestream at the channel bulk velocity (same mass flow).
+# default: "channel"
+# initial_condition = "channel"
+# y-boundary condition: "wall" = zero-flux ($no-penetration) slip walls
+# at y = ± ly/2, "periodic" = wrap in y. x/z are always periodic.
+# default: "wall"
+# y_boundary = "wall"
+# Viscosity model: "fixed" = constant mu = mu_ref,
+# "sutherland" = Sutherland-law temperature scaling from t_ref / s_suth.
+# default: "fixed"
+# viscosity_model = "fixed"
+# Dynamic viscosity used by "fixed" (in reference units, c=1).
+# default: 0.00016
+# mu_ref = 0.00016
+# Reference temperature for "sutherland" (K). default: 273.15
+# t_ref = 273.15
+# Sutherland constant for "sutherland" (K). default: 110.4
+# s_suth = 110.4
+# Divergence-free, wall-damped tripping perturbation, applied on top of
+# the initial condition at t=0 of a fresh run. "amplitude" is the
+# requested u' amplitude scale in physical velocity units (c = 1).
+# 0.0 (default) disables the perturbation kernel entirely.
+# perturbation_amplitude = 0.2
+# Number of superposed Fourier modes in the trip (default 16).
+# perturbation_modes = 16
+# Hash seed for the mode mix: same seed + same binary => same trip
+# (default 7).
+# perturbation_seed = 7
+# RESUME: load a solver-native checkpoint file instead of the analytic
+# initial condition. Takes precedence over initial_condition and skips
+# the trip kernel (the checkpoint already carries it). Resume is exact:
+# the continued trajectory is bitwise identical to an uninterrupted run.
+# path format: <output_dir>/<prefix>_<f32|f64>_<NNNNNN>.h5
+# initial_state = "output/checkpoint_f32_000100.h5"
 
 [solver]
+# Number of RK3 steps for THIS run (a resumed run still runs n_steps
+# additional steps from the checkpoint).
 n_steps = 10
+# Explicit time-step size (CFL-safe values only; the solver is not
+# adaptive).
 dt = 0.0001
-flux_scheme = "slau2" # "slau2" | "ausm+" | "rusanov"
+# Numerical flux: "slau2" (recommended), "ausm+", "rusanov".
+# default: "slau2"
+# flux_scheme = "slau2"
+# Let NVRTC compile the kernels with fast-math intrinsics. Changes
+# bitwise output; keep false if you want strict IEEE determinism.
+# default: true
+# fast_math = true
 
 [io]
+# Visualization dump every <save_freq> steps, written by the background
+# IO thread (async GPU copy; does not stall the solver loop).
 save_freq = 1
+# Resume checkpoints every <checkpoint_freq> steps; 0 disables
+# intermediate checkpoints. The FINAL step of every run is always
+# checkpointed, so any run ends resumable.
+# default: 0
+# checkpoint_freq = 1000
+# Dumps/checkpoints are HDF5, filter-compressed (all bitwise lossless,
+# resume states stay exact). Available options measured on the dev
+# laptop (turbulent 48^3, dump cadence 50):
+#   "none"        141.6 MB/dump, baseline solver speed
+#   "blosc-lz4"   105.3 MB/dump (26% smaller), ~free   <- default
+#   "blosc-zstd"   99.1 MB/dump (30% smaller), +4.6 ms/step
+#   "gzip1".."gzip9"  ~98.6 MB/dump (30% smaller), +21.6 ms/step at gzip4;
+#   readable by plain h5py with NO filters installed. blosc-* files are
+#   transparent to the SOLVER, but Python readers need
+#   pip install hdf5plugin (scripts/h5_to_xdmf.py does this itself).
+# Save labels count completed RK3 steps: label 0 is the initial
+# condition (t = 0), label k has t = k*dt; a resume continues labels
+# seamlessly from the checkpoint.
+# default: "blosc-lz4"
+# compression = "blosc-lz4"
+# Where dumps (flow_*), the t=0 state and checkpoints land.
 output_dir = "output"
+# Filename base: <prefix>_<f32|f64>_<label>.h5; the
+# resume checkpoints use "checkpoint" instead of <prefix> so
+# scripts/h5_to_xdmf.py can skip them automatically.
 prefix = "flow"
 
 [precision]
+# Per-stage pipeline types (NVRTC re-types the generated kernels):
+# state / flow-vector / RHS / misc-compute, each "f32" or "f64".
+# The usual fast visual run: everything f32.
 u_real = "f32"
 q_real = "f32"
 rhs_real = "f32"
