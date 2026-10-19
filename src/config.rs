@@ -90,6 +90,14 @@ fn default_fast_math() -> bool {
     true
 }
 
+fn default_perturbation_modes() -> u32 {
+    16
+}
+
+fn default_perturbation_seed() -> u32 {
+    7
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct PhysicsConfig {
     pub mach_bulk: f32,
@@ -105,6 +113,18 @@ pub struct PhysicsConfig {
     pub t_ref: f32,
     #[serde(default = "default_s_suth")]
     pub s_suth: f32,
+    /// Divergence-free wall-damped tripping perturbation: requested u'
+    /// amplitude scale in physical velocity units (compared to c=1).
+    /// 0.0 disables the perturbation kernel entirely (bit-identical to the
+    /// old laminar start).
+    #[serde(default)]
+    pub perturbation_amplitude: f32,
+    /// Number of superposed Fourier modes in the trip.
+    #[serde(default = "default_perturbation_modes")]
+    pub perturbation_modes: u32,
+    /// Hash seed for the mode mix (same seed + same binary => same trip).
+    #[serde(default = "default_perturbation_seed")]
+    pub perturbation_seed: u32,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]

@@ -296,6 +296,48 @@ __device__ __forceinline__ void compute_face_j(
     }
 }
 
+// Wall-face variant: the inviscid slip-wall flux is imposed directly as
+// F_wall = [0, 0, p_wall, 0, 0] (no mass/tangential/energy advection through
+// the wall, normal momentum = wall pressure). This blocks penetration
+// LINEARLY in the wall-normal velocity (a generic Riemann flux between a
+// mirrored state pair only penalises v quadratically, p_face = p for a
+// subsonic symmetric pair). The wall pressure is extracted bitwise-
+// consistently from the own Euler flux, so for the laminar wall state
+// (v == 0) F_wall == F_own and every j value is exactly zero. The gradient
+// slices come from the real side for BOTH sides, so the viscous traction
+// equals the own extrapolation (identical to the previous zero-correction
+// wall handling). Only the real element's j slot is written.
+template <typename DIR>
+__device__ __forceinline__ void compute_face_j_wall(
+    const COMPUTE_REAL* u_real, const COMPUTE_REAL* grad_real,
+    bool real_is_left,
+    COMPUTE_REAL* j_for_elem_left, COMPUTE_REAL* j_for_elem_right,
+    int elem_real, int face_pt, int num_faces_total) {
+    COMPUTE_REAL viscous_flux[5], euler_flux[5];
+
+    dispatch_viscous_flux(DIR{}, u_real, grad_real, viscous_flux);
+    dispatch_euler_flux(DIR{}, u_real, euler_flux);
+
+    // pressure = rho*v^2 + p - rho*v^2, i.e. the own flux minus the advective
+    // normal-momentum term -> bitwise equal to p for v == 0 (+/-0).
+    COMPUTE_REAL v_own_sqr_over_rho = u_real[2] * u_real[2] / u_real[0];
+    COMPUTE_REAL wall_flux[5] = {(COMPUTE_REAL)0.0, (COMPUTE_REAL)0.0,
+                                 euler_flux[2] - v_own_sqr_over_rho,
+                                 (COMPUTE_REAL)0.0, (COMPUTE_REAL)0.0};
+
+    for (int v = 0; v < 5; ++v) {
+        // 0.5*(tau_wall_side + tau_own) == tau_own exactly (same slices); both
+        // subtractions are identical expressions, so the viscous traction
+        // cancels exactly and j == wall_flux - euler_flux in value.
+        COMPUTE_REAL flux_common = wall_flux[v] - viscous_flux[v];
+        COMPUTE_REAL j_real = flux_common - (euler_flux[v] - viscous_flux[v]);
+        if (real_is_left)
+            j_for_elem_left[v * num_faces_total + elem_real * NPTS_FACE + face_pt] = j_real;
+        else
+            j_for_elem_right[v * num_faces_total + elem_real * NPTS_FACE + face_pt] = j_real;
+    }
+}
+
 // Fused gradient + volume RHS. The gradient stays in registers (Q eliminated):
 // boundary extrapolations are written to per-face slices for the face kernels,
 // and the volume integrals consume the register copy directly.
@@ -513,6 +555,63 @@ extern "C" __global__ void compute_face_flux_x_kernel(const U_REAL* U, COMPUTE_R
         j_x_right, j_x_left, elem_left, elem_right, pt, num_faces_total);
 }
 
+// ---------------------------------------------------------------------------
+// Wall faces (BC_Y_WALL) get their own kernel so that no warp ever mixes
+// wall-face and interior-face work (uniform warps, no divergent shuffles).
+// One block per wall face: 2*nx*nz blocks of NPTS_FACE threads.
+//
+// Treatment: the ghost side is the real element's wall-face-extrapolated
+// state with ONLY the wall-normal momentum reflected (free slip), evaluated
+// through the same interface flux; the gradient slices of the real side are
+// shared by both sides, so the viscous traction equals the own extrapolation
+// (identical to the previous zero-correction wall handling). Only the real
+// element's j slot is written; the ghost has no element. For the laminar
+// wall state (v == 0 at the wall, tangential extended evenly) the interface
+// flux equals the own Euler flux and every j value is exactly zero.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void compute_face_flux_y_wall_kernel(const U_REAL* U,
+    COMPUTE_REAL* j_y_left, COMPUTE_REAL* j_y_right, const COMPUTE_REAL* grad_y_left,
+    const COMPUTE_REAL* grad_y_right, int nx, int ny, int nz, COMPUTE_REAL ly) {
+    const unsigned mask = 0xffffffffu; // every lane of the block participates
+    int pt = threadIdx.x;              // the 16 face points of this wall face
+    int plane = blockIdx.x % 2;        // 0 = lower wall (real elem 0), 1 = upper (elem ny-1)
+    int rest = blockIdx.x / 2;
+    int elem_x = rest % nx;
+    int elem_z = rest / nx;
+    bool upper = (plane == 1);
+    int elem_real = upper ? (elem_x + nx * ((ny - 1) + ny * elem_z))
+                          : (elem_x + nx * (ny * elem_z));
+    int total_points = nx * ny * nz * NPTS_ELEM;
+    int m = pt % NPTS1D;
+    int k = pt / NPTS1D;
+    int base_real = elem_real * NPTS_ELEM + (m * NPTS1D + k * NPTS1D2);
+    COMPUTE_REAL coeff_real = upper ? c_extrap_right[m] : c_extrap_left[m];
+
+    COMPUTE_REAL u_left[5] = {0}, u_right[5] = {0};
+    for (int v = 0; v < 5; ++v) {
+        typename V4Type<U_REAL>::type u_vec = ld4(U + v * total_points + base_real);
+        COMPUTE_REAL s0 = (COMPUTE_REAL)u_vec.x * coeff_real, s1 = (COMPUTE_REAL)u_vec.y * coeff_real,
+                     s2 = (COMPUTE_REAL)u_vec.z * coeff_real, s3 = (COMPUTE_REAL)u_vec.w * coeff_real;
+        s0 += __shfl_xor_sync(mask, s0, 1); s1 += __shfl_xor_sync(mask, s1, 1);
+        s2 += __shfl_xor_sync(mask, s2, 1); s3 += __shfl_xor_sync(mask, s3, 1);
+        s0 += __shfl_xor_sync(mask, s0, 2); s1 += __shfl_xor_sync(mask, s1, 2);
+        s2 += __shfl_xor_sync(mask, s2, 2); s3 += __shfl_xor_sync(mask, s3, 2);
+        COMPUTE_REAL sum = (m == 0) ? s0 : (m == 1) ? s1 : (m == 2) ? s2 : s3;
+        if (upper) u_left[v] = sum; else u_right[v] = sum;
+    }
+    // Real element's face slice read twice: both sides share it, so the
+    // 0.5*(tau_wall_side + tau_own) average is the own traction exactly.
+    const COMPUTE_REAL* src_real = upper
+        ? (grad_y_right + ((size_t)elem_real * NPTS_FACE + pt) * 12)
+        : (grad_y_left  + ((size_t)elem_real * NPTS_FACE + pt) * 12);
+    COMPUTE_REAL grad_left[15] = {0}, grad_right[15] = {0};
+    read_gradient_slice<5, 9, 12, 14>(src_real, src_real, grad_left, grad_right);
+
+    int num_faces_total = nx * ny * nz * NPTS_FACE;
+    compute_face_j_wall<flux_dir_y>(upper ? u_left : u_right, upper ? grad_left : grad_right,
+        upper, j_y_right, j_y_left, elem_real, pt, num_faces_total);
+}
+
 extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_REAL* j_y_left, COMPUTE_REAL* j_y_right, const COMPUTE_REAL* grad_y_left, const COMPUTE_REAL* grad_y_right, int nx, int ny, int nz, COMPUTE_REAL ly) {
     int face_in_block = threadIdx.x / NPTS_FACE;
     int pt = threadIdx.x % NPTS_FACE;
@@ -526,13 +625,13 @@ extern "C" __global__ void compute_face_flux_y_kernel(const U_REAL* U, COMPUTE_R
     int elem_y = y_group * FACES_PER_BLOCK + face_in_block;
     if (elem_y >= ny) return;
 #if BC_Y_WALL
-    if (elem_y == 0) return; // wall face: flux slots stay zero (zero-flux slip wall)
+    if (elem_y == 0) return; // wall face handled by compute_face_flux_y_wall_kernel
 #endif
 
     int total_points = nx * ny * nz * NPTS_ELEM;
 
     // Shuffle mask must name only lanes that survived the early returns above:
-    // partial face groups (elem_y >= ny) and the elem_y == 0 wall face diverge within a warp.
+    // partial face groups and the elem_y == 0 wall face diverge within a warp.
     const unsigned mask = __activemask();
 
 #if BC_Y_WALL

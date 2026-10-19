@@ -52,9 +52,11 @@ impl PrecisionType for f64 {
 
 struct KernelHandles {
     init_flow: cudarc::driver::CudaFunction,
+    perturb_flow: cudarc::driver::CudaFunction,
     rhs_volume: cudarc::driver::CudaFunction,
     face_x: cudarc::driver::CudaFunction,
     face_y: cudarc::driver::CudaFunction,
+    face_y_wall: cudarc::driver::CudaFunction,
     face_z: cudarc::driver::CudaFunction,
     rk_stage: cudarc::driver::CudaFunction,
     rk_stage1: cudarc::driver::CudaFunction,
@@ -67,6 +69,7 @@ struct LaunchConfigs {
     add: cudarc::driver::LaunchConfig,
     face_x: cudarc::driver::LaunchConfig,
     face_y: cudarc::driver::LaunchConfig,
+    face_y_wall: Option<cudarc::driver::LaunchConfig>,
     face_z: cudarc::driver::LaunchConfig,
 }
 
@@ -164,7 +167,8 @@ pub fn run_solver_generic<
     let (final_tx, final_rx) = std::sync::mpsc::channel::<cudarc::driver::PinnedHostSlice<U>>();
 
     let mach_bulk = COMP::from_f64(config.physics.mach_bulk as f64);
-    let cfgs = launch_configs(&mesh);
+    let wall_y = config.physics.y_boundary == crate::config::YBoundary::Wall;
+    let cfgs = launch_configs(&mesh, wall_y);
 
     println!("Initializing flow...");
     launch_init_flow(
@@ -175,6 +179,23 @@ pub fn run_solver_generic<
         &mesh,
         mach_bulk,
     )?;
+
+    let perturb_amp = config.physics.perturbation_amplitude;
+    if perturb_amp != 0.0 {
+        let n_modes = config.physics.perturbation_modes.max(1) as i32;
+        let seed = COMP::from_f64(config.physics.perturbation_seed as f64);
+        println!("Tripping with {} divergence-free modes, amplitude {}...", n_modes, perturb_amp);
+        launch_perturb_flow(
+            &stream,
+            &kernels.perturb_flow,
+            cfgs.volume,
+            &mut buffers.u,
+            &mesh,
+            COMP::from_f64(perturb_amp as f64),
+            n_modes,
+            seed,
+        )?;
+    }
 
     // SAVE INITIAL CONDITION AS STEP 99999
     let mut h_u = pool_rx.recv()?;
@@ -188,6 +209,9 @@ pub fn run_solver_generic<
         mesh.nx,
         mesh.ny,
         mesh.nz,
+        mesh.lx.to_f32() as f64,
+        mesh.ly.to_f32() as f64,
+        mesh.lz.to_f32() as f64,
         &out_dir,
         &prefix,
     )?;
@@ -400,9 +424,11 @@ fn load_kernels(
 ) -> Result<KernelHandles, Box<dyn std::error::Error>> {
     Ok(KernelHandles {
         init_flow: module.load_function("init_flow_kernel")?,
+        perturb_flow: module.load_function("perturb_flow_kernel")?,
         rhs_volume: module.load_function("compute_rhs_volume_kernel")?,
         face_x: module.load_function("compute_face_flux_x_kernel")?,
         face_y: module.load_function("compute_face_flux_y_kernel")?,
+        face_y_wall: module.load_function("compute_face_flux_y_wall_kernel")?,
         face_z: module.load_function("compute_face_flux_z_kernel")?,
         rk_stage: module.load_function("rk_stage_kernel")?,
         rk_stage1: module.load_function("rk_stage1_kernel")?,
@@ -478,7 +504,7 @@ fn mesh_dims<COMP: PrecisionType>(mesh_cfg: &crate::config::MeshConfig) -> MeshD
     }
 }
 
-fn launch_configs<COMP>(mesh: &MeshDims<COMP>) -> LaunchConfigs {
+fn launch_configs<COMP>(mesh: &MeshDims<COMP>, wall_y: bool) -> LaunchConfigs {
     let block_dim = (PTS_PER_ELEM as u32, 1, 1);
     LaunchConfigs {
         volume: cudarc::driver::LaunchConfig {
@@ -511,6 +537,12 @@ fn launch_configs<COMP>(mesh: &MeshDims<COMP>) -> LaunchConfigs {
             block_dim,
             shared_mem_bytes: 0,
         },
+        // Wall faces get a dedicated launch (only when wall BC is active).
+        face_y_wall: (wall_y as usize != 0).then(|| cudarc::driver::LaunchConfig {
+            grid_dim: ((2 * mesh.nx * mesh.nz) as u32, 1, 1),
+            block_dim: (PTS_PER_FACE as u32, 1, 1),
+            shared_mem_bytes: 0,
+        }),
     }
 }
 
@@ -566,6 +598,38 @@ fn launch_init_flow<U: PrecisionType, COMP: PrecisionType>(
         .arg(&nz_i32)
         .arg(&mach_bulk)
         .arg(&mesh.ly);
+    unsafe { args.launch(cfg)? };
+    Ok(())
+}
+
+// Div-free wall-damped trip: amplitude in velocity units, hashed mode mix
+// seeded on config (same config + binary => identical perturbation).
+#[allow(clippy::too_many_arguments)]
+fn launch_perturb_flow<U: PrecisionType, COMP: PrecisionType>(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    kernel: &cudarc::driver::CudaFunction,
+    cfg: cudarc::driver::LaunchConfig,
+    d_u: &mut cudarc::driver::CudaSlice<U>,
+    mesh: &MeshDims<COMP>,
+    amp: COMP,
+    n_modes: i32,
+    seed: COMP,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let nx_i32 = mesh.nx as i32;
+    let ny_i32 = mesh.ny as i32;
+    let nz_i32 = mesh.nz as i32;
+
+    let mut args = stream.launch_builder(kernel);
+    args.arg(d_u)
+        .arg(&nx_i32)
+        .arg(&ny_i32)
+        .arg(&nz_i32)
+        .arg(&mesh.lx)
+        .arg(&mesh.ly)
+        .arg(&mesh.lz)
+        .arg(&amp)
+        .arg(&n_modes)
+        .arg(&seed);
     unsafe { args.launch(cfg)? };
     Ok(())
 }
@@ -627,6 +691,21 @@ fn launch_rhs_stage<U: PrecisionType, RHS: PrecisionType, COMP: PrecisionType>(
         .arg(&nz_i32)
         .arg(&mesh.ly);
     unsafe { args_y.launch(cfgs.face_y)? };
+
+    if let Some(cfg_wall) = &cfgs.face_y_wall {
+        let mut args_w = stream.launch_builder(&kernels.face_y_wall);
+        args_w
+            .arg(&buffers.u)
+            .arg(&buffers.face_j.j_y_left)
+            .arg(&buffers.face_j.j_y_right)
+            .arg(&buffers.grads.y_left)
+            .arg(&buffers.grads.y_right)
+            .arg(&nx_i32)
+            .arg(&ny_i32)
+            .arg(&nz_i32)
+            .arg(&mesh.ly);
+        unsafe { args_w.launch(*cfg_wall)? };
+    }
 
     let mut args_z = stream.launch_builder(&kernels.face_z);
     args_z
@@ -710,6 +789,11 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
     let out_dir = config.io.output_dir.clone();
     let prefix = config.io.prefix.clone();
     let (nx, ny, nz) = (mesh.nx, mesh.ny, mesh.nz);
+    let (lx, ly, lz) = (
+        mesh.lx.to_f32() as f64,
+        mesh.ly.to_f32() as f64,
+        mesh.lz.to_f32() as f64,
+    );
     let io_stream_clone = io_stream.clone();
 
     Ok(std::thread::spawn(move || {
@@ -718,7 +802,7 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
         let result: Result<(), Box<dyn std::error::Error>> = (|| {
             io_stream_clone.synchronize()?;
             let slice = buf.as_slice()?;
-            crate::io::save_hdf5_xdmf(step, slice, nx, ny, nz, &out_dir, &prefix)?;
+            crate::io::save_hdf5_xdmf(step, slice, nx, ny, nz, lx, ly, lz, &out_dir, &prefix)?;
             Ok(())
         })();
         if let Err(e) = result {
