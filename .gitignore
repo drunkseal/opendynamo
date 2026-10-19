@@ -1,2 +1,19 @@
 /target
 /output
+
+# Scratch / experimental copies of kernel sources from performance experiments
+src/cuda.backup/
+src/cuda.new/
+src/cuda.optimized/
+src/cuda/cuda.backup/
+src/cuda/cuda.optimized/
+src/cuda/fused.cu
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Editor/OS noise
+*.swp
+.idea/
+.vscode/
