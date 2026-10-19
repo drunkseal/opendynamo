@@ -1,0 +1,212 @@
+# OpenDynamo
+
+GPU spectral-element (Flux Reconstruction, P=3) solver for compressible Navier–Stokes
+in a 3D box, written in Rust with CUDA kernels compiled **at runtime** via NVRTC —
+no `nvcc` build step, no prebuilt fatbins. Built to make turbulence look good:
+fast enough for interactive-length visual runs, exact enough to restart a run
+ mid-trajectory and continue *bit-for-bit*.
+
+Developed and validated on a laptop with a GTX 1650 Ti; the design goal was
+honest, measured performance: every claimed overhead is A/B-measured on the
+same binary, and every continuity claim was verified by comparing raw state
+bytes.
+
+---
+
+## What it does
+
+| | |
+|---|---|
+| **Method** | Flux Reconstruction collocation on hexes, P=3 (64 solution points/element), uniform Cartesian mesh |
+| **Physics** | 3D compressible Euler / Navier–Stokes (fixed or Sutherland viscosity), ideal-gas EOS, γ=1.4 |
+| **Time** | Explicit 3-stage RK3 |
+| **Fluxes** | SLAU2, AUSM+ or Rusanov (fast-math toggle) |
+| **Boundaries** | y: periodic or no-penetration slip wall; x/z: periodic |
+| **Initial conditions** | Parabolic Poiseuille channel, uniform freestream |
+| **Turbulence trip** | Divergence-free, wall-damped random Fourier perturbation (amplitude, #modes, seed → reproducible) |
+| **Device code** | `.cu` compiled at startup by NVRTC; pipeline precision, flux scheme and wall branch are RUST compile-time choices selected per config |
+| **Precision** | Per-stage pipeline: state / stage / RHS / flux / compute can each be f32 or f64 (dispatched by macro) |
+
+### Wall treatment
+
+The y-wall uses a **direct inviscid slip-wall flux** `F_wall = [0, 0, p_wall, 0, 0]`:
+it blocks penetration *linearly* in wall-normal velocity. (The textbook
+mirrored-state Riemann approach acts only at O(v²) — with a fast scheme it
+silently lets wall-normal momentum leak until the run blows up; don't do that.)
+The wall branch runs in a dedicated kernel to avoid any intra-warp divergent
+fest, and costs ≈0.17 % of step time vs pure periodic.
+
+---
+
+## Build & run
+
+Requirements: **Rust (2024 edition)**, an NVIDIA GPU + driver, and a CUDA
+toolkit in the path (cudarc links NVRTC from it).
+
+```sh
+cargo build --release
+./target/release/open_dynamo        # reads ./config.toml
+```
+
+The solver produces exactly one kind of artifact — a **solver-native state
+file** — written identically for dumps, checkpoints and resume files:
+
+```
+<prefix>_<f32|f64>_<NNNNNN>.h5        # e.g. flow_f32_000500.h5
+```
+
+Inside: group `data/` with five 1-D datasets `rho rhou rhov rhow E`
+(raw var-major device layout), plus file attrs
+`nx ny nz fr_order step t lx ly lz u_real`.
+No derived fields, no reordering — the Rust IO thread just streams the state.
+
+## Labeling convention
+
+Save labels count **completed RK3 steps**:
+
+- `…_000000.h5` — the initial condition itself (`t = 0` for a fresh run),
+- `…_000001.h5` — after 1 step, …,
+- a fresh 300-step run ends at `…_000300.h5`, and `t = label·dt` exactly;
+- resumed runs continue `S+1, S+2, …` from the checkpoint's label, so file
+  names are chronological everywhere (also for `checkpoint_*` files).
+
+## Resume & checkpoints
+
+Two config fields, zero ceremony:
+
+```toml
+[io]
+save_freq       = 50      # visualization dump cadence
+checkpoint_freq = 1000    # resume checkpoints every N steps (0 = none)
+```
+
+Every run **always** checkpoints at the final step, so any run ends resumable.
+Kill a run wherever you like, point a new config at the file:
+
+```toml
+[physics]
+initial_state = "/runs/long/checkpoint_f32_010000.h5"
+```
+
+The loader validates mesh dims, FR order and precision against the current
+config, skips the init and trip kernels (the checkpoint already carries the
+trip), and continues labels and physical time. Restart is **exact**:
+for the explicit scheme `u` fully defines a step-boundary state, and it has
+been proven byte-identical — N steps, checkpoint, N more ≡ one uninterrupted
+run (all 92 MB of state, every variable, bitwise equal).
+
+## Compression
+
+```toml
+[io]
+compression = "blosc-lz4"   # "none" | "gzip1".."gzip9" | "blosc-lz4" | "blosc-zstd"
+```
+
+All modes are lossless and transparently readable by the solver (blosc is
+statically linked in), so resume works from any mode, on files written by any
+mode. Measured on the reference laptop (turbulent 48³ runs, dump cadence 50):
+
+```
+none        141.6 MB/dump,  61.3 ms/step   (plain baseline)
+blosc-lz4   105.3 MB/dump (−26%),  62.5 ms/step   ← default
+blosc-zstd   99.1 MB/dump (−30%),  65.9 ms/step
+gzip4        98.6 MB/dump (−30%),  82.0 ms/step   (needs no plugins to read)
+```
+
+blosc files need `pip install hdf5plugin` to be read by *Python*; use gzip or
+none if plugin-free reads matter more than disk space.
+
+## ParaView
+
+The solver doesn't speak ParaView on purpose — a script does, keeping the
+device-side data flow minimal:
+
+```sh
+python3 scripts/h5_to_xdmf.py runs/flow_f32_*.h5
+```
+
+For every dump it writes `<name>.pv.h5` (global solution-point tensor +
+derived `vel`, `p`) plus an XDMF rectilinear-grid twin, gzip-compressed so
+ParaView needs no plugins. Solver files are never modified; checkpoint files
+are skipped unless you pass them explicitly — also a handy way to look at a
+restart state.
+
+Manual loading (any h5py with `hdf5plugin` imported):
+
+```python
+import h5py, hdf5plugin, numpy as np
+f = h5py.File("flow_f32_000500.h5")
+nx, ny, nz = (int(f.attrs[k]) for k in ("nx", "ny", "nz"))
+# flat var-major plane -> global tensor (x fastest):
+rho = (f["data/rho"][:]
+       .reshape(nz, ny, nx, 4, 4, 4)      # (ez, ey, ex, k, j, i)
+       .transpose(2, 5, 1, 4, 0, 3)       # -> (ex, i, ey, j, ez, k)
+       .reshape(nx * 4, ny * 4, nz * 4))
+```
+
+## Config reference (excerpt)
+
+```toml
+[mesh]
+nx = 48               # elements
+ny = 48
+nz = 48
+lx = 12.566370614359172
+ly = 2.0
+lz = 6.283185307179586
+
+[physics]
+mach_bulk = 0.3
+initial_condition = "channel"     # or "uniform"
+y_boundary = "wall"               # or "periodic"
+viscosity_model = "fixed"         # or "sutherland"
+mu_ref = 0.005556
+perturbation_amplitude = 0.2      # 0 disables the trip kernel entirely
+perturbation_modes = 16
+perturbation_seed = 7             # same seed+binary => same trip
+initial_state = "/path/checkpoint_f32_000100.h5"  # resume
+
+[solver]
+n_steps = 4000
+dt = 5.0e-4
+flux_scheme = "slau2"             # "ausm+" or "rusanov"
+fast_math = true
+
+[io]
+save_freq = 50
+checkpoint_freq = 1000
+compression = "blosc-lz4"
+output_dir = "runs/base"
+prefix = "flow"
+
+[precision]
+u_real = "f32"                    # also "f64" per stage; NVRTC re-types the
+q_real = "f32"                    # generated pipeline automatically
+rhs_real = "f32"
+compute_real = "f32"
+```
+
+## Performance notes
+
+- 48³ (192³ solution points ≈ 7.1 M DOF), f32 pipeline, NVRTC + fast-math,
+  slau2: **~62 ms/step** sustained on a GTX 1650 Ti including the full
+  RK3 stage chain — dumps run on a background IO thread with an async GPU
+  copy, so visualization cadence doesn't stall the loop.
+- Dumps are raw device layout: no reordering, no derived-field math on the
+  IO path. Reordering happens once per frame in the ParaView script.
+- Binary was verified bitwise-neutral across the wall-closure and
+  resume/compression work series: every "no numerics touched" claim was
+  checked by 250-step bitwise trajectory comparison.
+
+## Layout facts you'll want when poking at the data
+
+- State buffer ordering: **var-major** — plane order ρ, ρu, ρv, ρw, ρE; within
+  a plane, element-major *64-point blocks*, `pt = i + P·j + P²·k`,
+  `elem = ex + nx·ey + nx·ny·ez` (x fastest).
+- Pressure (upstream, clamped at 1e-7):
+  `p = (γ−1)·(E − 0.5·(ρu²+ρv²+ρw²)/ρ)`, γ = 1.4.
+- Viscosity: constant `mu_ref` or Sutherland-law temperature scaling.
+
+## License
+
+`©` the author (drunkseal). All rights reserved until a LICENSE lands.
