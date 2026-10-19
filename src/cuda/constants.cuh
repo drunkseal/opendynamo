@@ -31,9 +31,6 @@
 #error "FR_ORDER other than 3 unsupported: float4 loads and 4-lane butterfly shuffles assume 4 points per direction"
 #endif
 
-#ifndef INIT_CHANNEL
-#error "INIT_CHANNEL must be defined via -D (1 = channel profile, 0 = uniform)"
-#endif
 #ifndef BC_Y_WALL
 #error "BC_Y_WALL must be defined via -D (1 = slip walls, 0 = periodic)"
 #endif
