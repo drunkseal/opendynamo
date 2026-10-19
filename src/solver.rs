@@ -239,6 +239,15 @@ pub fn run_solver_generic<
         }
     };
     let base_t = resume.as_ref().map(|r| r.1).unwrap_or(0.0);
+    let compression = crate::io::parse_compression(&config.io.compression)?;
+    if matches!(
+        compression,
+        crate::io::SaveCompression::BloscLz4(_) | crate::io::SaveCompression::BloscZstd(_)
+    ) {
+        // Blosc compresses in parallel; leave the rest of the cores to the
+        // solver and OS.
+        hdf5_metno::filters::blosc_set_nthreads(4);
+    }
 
     // SAVE INITIAL CONDITION AS STEP 99999
     let mut h_u = pool_rx.recv()?;
@@ -259,6 +268,7 @@ pub fn run_solver_generic<
         mesh.lx.to_f32() as f64,
         mesh.ly.to_f32() as f64,
         mesh.lz.to_f32() as f64,
+        compression,
     )?;
     pool_tx
         .send(h_u)
@@ -335,7 +345,8 @@ pub fn run_solver_generic<
                 pool_tx.clone()
             };
             io_threads.push(spawn_io_task(
-                &stream, &io_stream, &buffers.u, &mesh, step, resume, &config, buf, done,
+                &stream, &io_stream, &buffers.u, &mesh, step, resume, compression, &config, buf,
+                done,
             )?);
         }
     }
@@ -824,6 +835,7 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
     mesh: &MeshDims<COMP>,
     step: usize,
     resume: Option<(usize, f64)>,
+    compression: crate::io::SaveCompression,
     config: &crate::config::OpenDynamoConfig,
     mut buf: cudarc::driver::PinnedHostSlice<U>,
     done: std::sync::mpsc::Sender<cudarc::driver::PinnedHostSlice<U>>,
@@ -864,7 +876,7 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
                 None => step,
             };
             let t = base_t + (step as f64 + 1.0) * (config_dt as f64);
-            crate::io::save_state_h5(label, t, kind, &out_dir, &prefix, slice, nx, ny, nz, lx, ly, lz)?;
+            crate::io::save_state_h5(label, t, kind, &out_dir, &prefix, slice, nx, ny, nz, lx, ly, lz, compression)?;
             // Checkpoint on the save cadence, and always at the final step
             // so every run ends with a resumable state.
             let want_checkpoint = step == n_steps - 1
@@ -883,6 +895,7 @@ fn spawn_io_task<U: PrecisionType, COMP: PrecisionType>(
                     lx,
                     ly,
                     lz,
+                    compression,
                 )?;
             }
             Ok(())

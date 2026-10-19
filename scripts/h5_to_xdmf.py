@@ -22,6 +22,12 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+try:
+    import hdf5plugin  # noqa: F401  (registers blosc filters; solver saves may use them)
+    HAS_HDF5PLUGIN = True
+except ImportError:
+    HAS_HDF5PLUGIN = False
+
 GAMMA = 1.4
 VAR_NAMES = ["rho", "rhou", "rhov", "rhow", "E"]
 
@@ -47,7 +53,17 @@ def process(src: Path) -> None:
         step = int(f.attrs["step"])
         t = float(f.attrs["t"])
         lx, ly, lz = (float(f.attrs[k]) for k in ("lx", "ly", "lz"))
-        raw = [np.asarray(g[n], dtype=np.float32).reshape(-1) for n in VAR_NAMES]
+        raw = []
+        for n in VAR_NAMES:
+            ds = g[n]
+            comp = ds.compression
+            if comp not in (None, "gzip") and not HAS_HDF5PLUGIN:
+                sys.exit(
+                    f"{src.name}: /data/{n} uses the '{comp}' filter, which needs "
+                    "`pip install hdf5plugin` to read (solver saved with "
+                    '[io] compression = "blosc-lz4"|"blosc-zstd")'
+                )
+            raw.append(np.asarray(ds, dtype=np.float32).reshape(-1))
 
     total_points = nx * ny * nz
     p1 = round((raw[0].size / total_points) ** (1.0 / 3.0))
@@ -105,7 +121,14 @@ def process(src: Path) -> None:
     with h5py.File(h5_out, "w") as f:
         g2 = f.create_group("data")
         for n, arr in fields.items():
-            g2.create_dataset(n, data=arr.astype(np.float32))
+            g2.create_dataset(
+                n,
+                data=arr.astype(np.float32),
+                chunks=(48, 48, 48),
+                shuffle=True,
+                compression="gzip",
+                compression_opts=4,
+            )
     xmf = src.with_suffix(".xmf")
     xmf.write_text(xml)
     print(f"{src.name} (step {step}, t={t:.5g}): fields {sorted(fields)} -> {h5_out.name} + {xmf.name}")
